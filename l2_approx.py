@@ -75,10 +75,14 @@ def generate_data(N, D, _type):
     """
     if _type == 'independent':
         return np.random.randn(N, D)
-    elif _type == 'sparse':
+    elif _type.startswith('sparse'):
+        try:
+            kk = int(_type.split('_')[1])
+        except ValueError:
+            kk = int(float(_type.split('_')[1]) * D)
         xx = np.random.randn(N, D)
         return np.vstack(
-            [xx[ii, random.sample(range(D), 10)] for ii in xrange(N)])
+            [xx[ii, random.sample(range(D), kk)] for ii in xrange(N)])
     else:
         assert False, "Unknown data type."
 
