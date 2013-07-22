@@ -1,4 +1,5 @@
 # A bunch of experiments to check the L2 normalization approximation.
+import argparse
 from ipdb import set_trace
 import numpy as np
 import random
@@ -108,4 +109,30 @@ def experiment_L2_approx(N, D, _type, nr_repeats, verbose=0):
     return mean_std_err_errors(true_values, approx_values)
 
 
-experiment_L2_approx(10, 1000, 'sparse', 3, 2)
+def main():
+    parser = argparse.ArgumentParser(
+        description="Experiments to test the L2 norm approximation.")
+
+    parser.add_argument(
+        '-N', '--nr_samples', type=int, required=True,
+        help="number of samples.")
+    parser.add_argument(
+        '-D', '--nr_dimensions', type=int, required=True,
+        help="number of dimensions.")
+    parser.add_argument(
+        '--nr_repeats', type=int, default=10,
+        help="number of times to repeat an experiment.")
+    parser.add_argument(
+        '--sampling_type', default='independent',
+        help="how the data is generated (inpendent, correlated, sparse).")
+    parser.add_argument(
+        '-v', '--verbose', action='count', help="verbosity level.")
+
+    args = parser.parse_args()
+    experiment_L2_approx(
+        args.nr_samples, args.nr_dimensions, args.sampling_type,
+        args.nr_repeats, args.verbose)
+
+
+if __name__ == '__main__':
+    main()
