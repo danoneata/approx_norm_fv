@@ -6,8 +6,7 @@ import random
 from fisher_vectors.model.utils import compute_L2_normalization
 
 
-N = 100
-D = 100
+random.seed(0)
 np.random.seed(0)
 
 
