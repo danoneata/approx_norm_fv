@@ -1,6 +1,8 @@
 # A bunch of experiments to check the L2 normalization approximation.
 import argparse
 from ipdb import set_trace
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 import numpy as np
 import random
 
@@ -109,15 +111,33 @@ def experiment_L2_approx(N, D, _type, nr_repeats, verbose=0):
     return mean_std_err_errors(true_values, approx_values)
 
 
+def plot(relative_error, relative_std):
+    # Plot results.
+    plt.figure(figsize=(8.5, 10))
+    ax = plt.subplot(1, 1, 1)
+
+    for D, dd in relative_error.iteritems():
+        Ns, errors = zip(*sorted(dd.iteritems(), key=lambda tt: tt[0]))
+        ax.plot(Ns, errors) 
+
+    plt.tight_layout()
+
+    # Put labels.
+    ax.set_xlabel('Number of samples', labelpad=5)
+    ax.set_ylabel('Relative error', labelpad=5)
+
+    plt.show()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Experiments to test the L2 norm approximation.")
 
     parser.add_argument(
-        '-N', '--nr_samples', type=int, required=True,
+        '-N', '--nr_samples', nargs='+', required=True,
         help="number of samples.")
     parser.add_argument(
-        '-D', '--nr_dimensions', type=int, required=True,
+        '-D', '--nr_dimensions', nargs='+', required=True,
         help="number of dimensions.")
     parser.add_argument(
         '--nr_repeats', type=int, default=10,
@@ -126,12 +146,33 @@ def main():
         '--sampling_type', default='independent',
         help="how the data is generated (inpendent, correlated, sparse).")
     parser.add_argument(
+        '--plot', default=False, action='store_true', help="generate plots.")
+    parser.add_argument(
         '-v', '--verbose', action='count', help="verbosity level.")
 
     args = parser.parse_args()
-    experiment_L2_approx(
-        args.nr_samples, args.nr_dimensions, args.sampling_type,
-        args.nr_repeats, args.verbose)
+
+    Ns = np.array(map(int, args.nr_samples))
+    Ds = np.array(map(int, args.nr_dimensions))
+
+    # Get results.
+    relative_error = {}
+    relative_std = {}
+
+    for D in Ds:
+
+        relative_error[D] = {}
+        relative_std[D] = {}
+
+        for N in Ns:
+            _, _, mean_rel, std_rel = experiment_L2_approx(
+                N, D, args.sampling_type, args.nr_repeats, args.verbose)
+
+            relative_error[D][N] = mean_rel
+            relative_std[D][N] = std_rel
+
+    if args.plot:
+        plot(relative_error, relative_std)
 
 
 if __name__ == '__main__':
