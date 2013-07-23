@@ -206,7 +206,7 @@ def main():
         help="number of times to repeat an experiment.")
     synthetic_parser.add_argument(
         '--sampling_type', default='independent',
-        help="how the data is generated (inpendent, correlated, sparse).")
+        help="how the data is generated (independent, correlated, sparse).")
     synthetic_parser.add_argument(
         '--plot', default=False, action='store_true', help="generate plots.")
     synthetic_parser.add_argument(
