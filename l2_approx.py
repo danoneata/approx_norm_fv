@@ -7,6 +7,8 @@ import numpy as np
 import random
 import sys
 
+from sklearn.preprocessing import Scaler
+
 from dataset import Dataset
 from fisher_vectors.model.utils import compute_L2_normalization
 
@@ -168,11 +170,18 @@ def run_real_data_experiments(nr_samples, verbose):
         'hollywood2', suffix='.per_slice.delta_60', nr_clusters=256)
     samples, _ = dataset.get_data('test')
 
+    if verbose > 2:
+        print "Loading train data."
+    tr_data = load_sample_data(dataset, 'train')
+    scaler = Scaler()
+    scaler.fit(tr_data)
+
     true_values, approx_values = [], []
     for ii in xrange(nr_samples):
-        if verbose:
+        if verbose > 2:
             sys.stdout.write("%s\r" % samples[ii].movie)
-        data = load_sample_data(dataset, samples[ii])
+        data = load_sample_data(dataset, str(samples[ii]))
+        data = scaler.transform(data)
         L2_norm_true, L2_norm_approx = L2_approx(data)
         true_values.append(L2_norm_true)
         approx_values.append(L2_norm_approx)
