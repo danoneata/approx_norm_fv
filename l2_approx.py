@@ -165,14 +165,14 @@ def run_synthetic_data_experiments(args):
         plot(relative_error, relative_std)
 
 
-def run_real_data_experiments(nr_samples, verbose):
+def run_real_data_experiments(nr_samples, delta, verbose):
     dataset = Dataset(
-        'hollywood2', suffix='.per_slice.delta_60', nr_clusters=256)
+        'hollywood2', suffix='.per_slice.delta_%d' % delta, nr_clusters=256)
     samples, _ = dataset.get_data('test')
 
     if verbose > 2:
         print "Loading train data."
-    tr_data = load_sample_data(dataset, 'train')
+    tr_data, _ = load_sample_data(dataset, 'train')
     scaler = Scaler()
     scaler.fit(tr_data)
 
@@ -180,7 +180,7 @@ def run_real_data_experiments(nr_samples, verbose):
     for ii in xrange(nr_samples):
         if verbose > 2:
             sys.stdout.write("%s\r" % samples[ii].movie)
-        data = load_sample_data(dataset, str(samples[ii]))
+        data, _ = load_sample_data(dataset, str(samples[ii]))
         data = scaler.transform(data)
         L2_norm_true, L2_norm_approx = L2_approx(data)
         true_values.append(L2_norm_true)
@@ -226,6 +226,9 @@ def main():
         '-N', '--nr_samples', type=int, required=True,
         help="uses the first N samples from the filelist.")
     real_parser.add_argument(
+        '--delta', type=int, choices=(30, 60), default=60,
+        help="slice length.")
+    real_parser.add_argument(
         '-v', '--verbose', action='count', help="verbosity level.")
 
     args = parser.parse_args()
@@ -233,7 +236,7 @@ def main():
     if args.subparser_name == 'synthetic':
         run_synthetic_data_experiments(args)
     elif args.subparser_name == 'real':
-        run_real_data_experiments(args.nr_samples, args.verbose)
+        run_real_data_experiments(args.nr_samples, args.delta, args.verbose)
 
 
 if __name__ == '__main__':
