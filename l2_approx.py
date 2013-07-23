@@ -53,8 +53,8 @@ def print_info(true_values, approx_values, verbose):
 
 def mean_std_err_errors(true_values, approx_values):
     """ Returns mean and standard errors (absolute and relative). """
-    true_values = np.array(true_values)
-    approx_values = np.array(approx_values)
+    true_values = np.squeeze(np.array(true_values))
+    approx_values = np.squeeze(np.array(approx_values))
 
     absolute_err = np.abs(true_values - approx_values)
     relative_err = absolute_err / true_values * 100
