@@ -125,19 +125,31 @@ def experiment_L2_approx(N, D, _type, nr_repeats, verbose=0):
 
 def plot(relative_error, relative_std):
     # Plot results.
-    plt.figure(figsize=(8.5, 10))
+    plt.figure()
     ax = plt.subplot(1, 1, 1)
+    markers = iter(['x', '+', 'o', 'v', '^', '<', '>'])
+    colors = iter(['r', 'b', 'g', 'k', 'm', 'c'])
 
     for D, dd in relative_error.iteritems():
         Ns, errors = zip(*sorted(dd.iteritems(), key=lambda tt: tt[0]))
-        ax.plot(Ns, errors) 
+        color = colors.next()
+        ax.plot(
+            Ns, errors, label='$D=%d$' % D,
+            linewidth=2.0, marker=markers.next(), markeredgewidth=2.0,
+            clip_on=False, markeredgecolor=color, markerfacecolor=color,
+            color=color)
 
     plt.tight_layout()
+    ax.legend(loc='upper center')
 
     # Put labels.
-    ax.set_xlabel('Number of samples', labelpad=5)
-    ax.set_ylabel('Relative error', labelpad=5)
+    ax.set_xticks(Ns)
+    ax.set_xticklabels(map(str, Ns))
+    ax.set_xlabel('Number of samples $N$', labelpad=5)
+    ax.set_ylabel('Relative error $\epsilon$', labelpad=5)
+    plt.subplots_adjust(bottom=0.10, left=0.10)
 
+    plt.savefig('/tmp/l2_approx.eps')
     plt.show()
 
 
