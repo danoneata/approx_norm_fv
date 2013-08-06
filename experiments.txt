@@ -1,0 +1,13 @@
+std sqrt L2
+sqrt L2
+std L2
+std sqrt
+std
+std sqrt_cnt L2
+sqrt_cnt std L2
+std sqrt_cnt
+sqrt_cnt std
+sqrt_cnt L2
+sqrt_cnt std sqrt L2
+std sqrt std L2
+std sqrt_cnt std L2

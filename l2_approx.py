@@ -184,7 +184,7 @@ def run_real_data_experiments(nr_samples, delta, verbose):
 
     if verbose > 2:
         print "Loading train data."
-    tr_data, _ = load_sample_data(dataset, 'train')
+    tr_data, _, _ = load_sample_data(dataset, 'train', pi_derivatives=True)
     scaler = Scaler()
     scaler.fit(tr_data)
 
@@ -192,7 +192,8 @@ def run_real_data_experiments(nr_samples, delta, verbose):
     for ii in xrange(nr_samples):
         if verbose > 2:
             sys.stdout.write("%s\r" % samples[ii].movie)
-        data, _ = load_sample_data(dataset, str(samples[ii]))
+        data, _, _ = load_sample_data(
+            dataset, str(samples[ii]), pi_derivatives=True)
         data = scaler.transform(data)
         L2_norm_true, L2_norm_approx = L2_approx(data)
         true_values.append(L2_norm_true)
