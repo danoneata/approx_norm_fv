@@ -106,7 +106,9 @@ def L2_approx(data):
     return L2_norm_true, L2_norm_approx
 
 
-def experiment_L2_approx(N, D, _type, nr_repeats, verbose=0):
+def experiment_L2_approx(
+    N, D, _type, nr_repeats, do_scatter_plot=False, verbose=0):
+
     true_values, approx_values = [], []
     for ii in xrange(nr_repeats):
         data = generate_data(N, D, _type)
@@ -119,6 +121,9 @@ def experiment_L2_approx(N, D, _type, nr_repeats, verbose=0):
         print "Data generated:", _type
         print_info(true_values, approx_values, verbose)
         print
+
+    if do_scatter_plot:
+        scatter_plot(true_values, approx_values)
 
     return mean_std_err_errors(true_values, approx_values)
 
@@ -153,9 +158,47 @@ def plot(relative_error, relative_std):
     plt.show()
 
 
-def run_synthetic_data_experiments(args):
-    Ns = np.array(map(int, args.nr_samples))
-    Ds = np.array(map(int, args.nr_dimensions))
+def scatter_plot(true, estimated):
+    # Plot results.
+    plt.figure()
+    ax = plt.subplot(1, 1, 1)
+
+    max_value = np.maximum(np.max(true), np.max(estimated))
+    max_value *= 1.2
+
+    min_value = np.minimum(np.min(true), np.min(estimated))
+    min_value *= 0.8
+
+    ax.plot([0, max_value], [0, max_value], 'k-', lw=0.5)
+    ax.scatter(true, estimated, s=100)
+
+    ax.set_xlabel('True values', labelpad=5, fontsize=18)
+    ax.set_ylabel('Estimated values', labelpad=5, fontsize=18)
+
+    ax.set_xlim([min_value, max_value])
+    ax.set_ylim([min_value, max_value])
+
+    ax.xaxis.get_major_formatter().set_powerlimits((0, 1))
+    ax.yaxis.get_major_formatter().set_powerlimits((0, 1))
+
+    for tick in ax.xaxis.get_major_ticks():
+        tick.label.set_fontsize(16)
+
+    for tick in ax.yaxis.get_major_ticks():
+        tick.label.set_fontsize(16)
+
+    plt.subplots_adjust(bottom=0.10, left=0.10)
+
+    plt.savefig('/tmp/scatterplot.eps')
+    plt.show()
+
+
+def run_synthetic_data_experiments(
+    nr_samples, nr_dimensions, nr_repeats, sampling_type, do_plot,
+    do_scatter_plot, verbose):
+
+    Ns = np.array(map(int, nr_samples))
+    Ds = np.array(map(int, nr_dimensions))
 
     # Get results.
     relative_error = {}
@@ -168,19 +211,23 @@ def run_synthetic_data_experiments(args):
 
         for N in Ns:
             _, _, mean_rel, std_rel = experiment_L2_approx(
-                N, D, args.sampling_type, args.nr_repeats, args.verbose)
+                N, D, sampling_type, nr_repeats, do_scatter_plot, verbose)
 
             relative_error[D][N] = mean_rel
             relative_std[D][N] = std_rel
 
-    if args.plot:
+    if do_plot:
         plot(relative_error, relative_std)
 
 
-def run_real_data_experiments(nr_samples, delta, verbose):
+def run_real_data_experiments(
+    nr_samples, delta, verbose=0, do_scatter_plot=False):
+
     dataset = Dataset(
         'hollywood2', suffix='.per_slice.delta_%d' % delta, nr_clusters=256)
     samples, _ = dataset.get_data('test')
+    nr_samples = np.minimum(len(samples), nr_samples)
+    nr_samples = np.maximum(1, nr_samples)
 
     if verbose > 2:
         print "Loading train data."
@@ -203,6 +250,9 @@ def run_real_data_experiments(nr_samples, delta, verbose):
         print
         print_info(true_values, approx_values, verbose)
         print
+
+    if do_scatter_plot:
+       scatter_plot(true_values, approx_values) 
 
 
 def main():
@@ -232,6 +282,9 @@ def main():
     synthetic_parser.add_argument(
         '--plot', default=False, action='store_true', help="generate plots.")
     synthetic_parser.add_argument(
+        '--scatter_plot', default=False, action='store_true',
+        help="generate a scatter-plot with the true and estimated L2 norms.")
+    synthetic_parser.add_argument(
         '-v', '--verbose', action='count', help="verbosity level.")
 
     # Options for the real data case.
@@ -242,14 +295,21 @@ def main():
         '--delta', type=int, choices=(30, 60), default=60,
         help="slice length.")
     real_parser.add_argument(
+        '--scatter_plot', default=False, action='store_true',
+        help="generate a scatter-plot with the true and estimated L2 norms.")
+    real_parser.add_argument(
         '-v', '--verbose', action='count', help="verbosity level.")
 
     args = parser.parse_args()
 
     if args.subparser_name == 'synthetic':
-        run_synthetic_data_experiments(args)
+        run_synthetic_data_experiments(
+            args.nr_samples, args.nr_dimensions, args.nr_repeats,
+            args.sampling_type, args.plot, args.scatter_plot, args.verbose)
     elif args.subparser_name == 'real':
-        run_real_data_experiments(args.nr_samples, args.delta, args.verbose)
+        run_real_data_experiments(
+            args.nr_samples, args.delta, verbose=args.verbose,
+            do_scatter_plot=args.scatter_plot)
 
 
 if __name__ == '__main__':
