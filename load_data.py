@@ -78,6 +78,9 @@ def load_kernels(
         dataset, 'test', analytical_fim=analytical_fim,
         pi_derivatives=pi_derivatives, sqrt_nr_descs=False)
 
+    print "Train data: %dx%d" % tr_data.shape
+    print "Test data: %dx%d" % te_data.shape
+
     scalers = []
     plot_fisher_vector(tr_data[0], 'before')
     for norm in tr_norms:
@@ -88,7 +91,8 @@ def load_kernels(
         elif norm == 'sqrt':
             tr_data = power_normalize(tr_data, 0.5)
         elif norm == 'sqrt_cnt':
-            tr_data = approximate_signed_sqrt(tr_data, tr_counts)  # tr_data[:, :gmm.k])
+            tr_data = approximate_signed_sqrt(
+                tr_data, tr_counts, pi_derivatives=pi_derivatives)
         elif norm == 'L2':
             tr_data = L2_normalize(tr_data)
         plot_fisher_vector(tr_data[0], 'after_%s' % norm)
@@ -101,7 +105,8 @@ def load_kernels(
         elif norm == 'sqrt':
             te_data = power_normalize(te_data, 0.5)
         elif norm == 'sqrt_cnt':
-            te_data = approximate_signed_sqrt(te_data, te_counts)  # te_data[:, :gmm.k])
+            te_data = approximate_signed_sqrt(
+                te_data, te_counts, pi_derivatives=pi_derivatives)
         elif norm == 'L2':
             te_data = L2_normalize(te_data)
 
@@ -111,21 +116,31 @@ def load_kernels(
     return tr_kernel, tr_labels, te_kernel, te_labels
 
 
-def approximate_signed_sqrt(data, counts):
-    K = counts.shape[1]
-    N, dim = data.shape
-    D = (dim / K - 1) / 2
+def approximate_signed_sqrt(data, counts, pi_derivatives=False):
+    Nc, K = counts.shape
+    Nd, dim = data.shape
+    D = (dim / K - (1 if pi_derivatives else 0)) / 2
+    assert Nc == Nd, 'Data and counts sizes do not correspond.'
+
     sqrtQ = np.sqrt(np.abs(counts))
-    sqrt_counts = np.hstack((
-        sqrtQ, np.repeat(sqrtQ, D, axis=1), np.repeat(sqrtQ, D, axis=1)))
-    data = data / sqrt_counts
+    sqrtQ = np.hstack((
+        sqrtQ if pi_derivatives else np.empty((Nd, 0)),
+        sqrtQ.repeat(D, axis=1),
+        sqrtQ.repeat(D, axis=1)))
+    data = data / sqrtQ
+
+    # Remove degenerated values.
+    print 'Square rooting the counts'
+    print '\tNumber of infinite values', data[np.isinf(data)].size
+    print '\tNumber of NaN values', data[np.isnan(data)].size
     data[np.isnan(data) | np.isinf(data)] = 0.
+
     return data
 
 
 def plot_fisher_vector(xx, name='oo'):
     ii = np.argmax(np.abs(xx))
-    print "Maximum at %d is %f." % (ii, xx[ii])
+    print "%10s -- maximum at %7d is %+.3f." % (name, ii, xx[ii])
     D = xx.size
     fig = plt.figure()
     ax = fig.add_subplot(111)
