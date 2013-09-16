@@ -17,7 +17,7 @@ def load_sample_data(
     dataset, sample, analytical_fim=False, pi_derivatives=False,
     sqrt_nr_descs=False):
 
-    if sample in ('train', 'test'):
+    if str(sample) in ('train', 'test'):
         stats_file = "%s.dat" % sample
         labels_file = "labels_%s.info" % sample
         info_file = "info_%s.info" % sample
@@ -65,7 +65,8 @@ def load_sample_data(
 
 def load_kernels(
     dataset, tr_norms=['std', 'sqrt', 'L2'], te_norms=['std', 'sqrt', 'L2'],
-    analytical_fim=False, pi_derivatives=False, sqrt_nr_descs=False):
+    analytical_fim=False, pi_derivatives=False, sqrt_nr_descs=False,
+    only_train=False):
 
     with open(dataset.GMM, 'r') as ff:
         gmm = yael.gmm_read(ff)
@@ -74,12 +75,7 @@ def load_kernels(
     tr_data, tr_labels, tr_counts = load_sample_data(
         dataset, 'train', analytical_fim=analytical_fim,
         pi_derivatives=pi_derivatives, sqrt_nr_descs=sqrt_nr_descs)
-    te_data, te_labels, te_counts = load_sample_data(
-        dataset, 'test', analytical_fim=analytical_fim,
-        pi_derivatives=pi_derivatives, sqrt_nr_descs=False)
-
     print "Train data: %dx%d" % tr_data.shape
-    print "Test data: %dx%d" % te_data.shape
 
     scalers = []
     plot_fisher_vector(tr_data[0], 'before')
@@ -97,6 +93,16 @@ def load_kernels(
             tr_data = L2_normalize(tr_data)
         plot_fisher_vector(tr_data[0], 'after_%s' % norm)
 
+    tr_kernel = np.dot(tr_data, tr_data.T)
+    
+    if only_train:
+        return tr_kernel, tr_labels, scalers, tr_data
+
+    te_data, te_labels, te_counts = load_sample_data(
+        dataset, 'test', analytical_fim=analytical_fim,
+        pi_derivatives=pi_derivatives, sqrt_nr_descs=False)
+    print "Test data: %dx%d" % te_data.shape
+
     ii = 0
     for norm in te_norms:
         if norm == 'std':
@@ -110,7 +116,6 @@ def load_kernels(
         elif norm == 'L2':
             te_data = L2_normalize(te_data)
 
-    tr_kernel = np.dot(tr_data, tr_data.T)
     te_kernel = np.dot(te_data, tr_data.T)
 
     return tr_kernel, tr_labels, te_kernel, te_labels
