@@ -15,7 +15,7 @@ from fisher_vectors.model.utils import sstats_to_sqrt_features
 
 def load_sample_data(
     dataset, sample, analytical_fim=False, pi_derivatives=False,
-    sqrt_nr_descs=False):
+    sqrt_nr_descs=False, return_info=False):
 
     if str(sample) in ('train', 'test'):
         stats_file = "%s.dat" % sample
@@ -48,9 +48,11 @@ def load_sample_data(
     with open(labels_path, 'r') as ff:
         labels = cPickle.load(ff)
 
+    with open(info_path, 'r') as ff:
+        info = cPickle.load(ff)
+
     if sqrt_nr_descs:
-        with open(info_path, 'r') as ff:
-            T = cPickle.load(ff)['nr_descs']
+        T = info['nr_descs']
         T = np.sqrt(T)[:, np.newaxis]
     else:
         T = 1.
@@ -60,7 +62,10 @@ def load_sample_data(
     else:
         idxs = slice(K, D)
 
-    return T * data[:, idxs], labels, counts
+    if return_info:
+        return T * data[:, idxs], labels, counts, info
+    else:
+        return T * data[:, idxs], labels, counts
 
 
 def load_kernels(
