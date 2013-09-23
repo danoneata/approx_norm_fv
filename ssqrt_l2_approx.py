@@ -138,19 +138,6 @@ def evaluate_worker(
     return ii, average_precision(true_labels, predictions)
 
 
-def test_aggregate():
-    dataset = Dataset('hollywood2', suffix='.per_slice.delta_60', nr_clusters=256)
-    samples, _ = dataset.get_data('test')
-    samples = samples[:10]
-    names, _, slice_fisher_vectors, _, nr_descriptors = load_slices(dataset, samples)
-    mask = build_aggregation_mask(names)
-    video_fisher_vectors_1 = aggregate(slice_fisher_vectors, mask, nr_descriptors=None)
-    video_fisher_vectors_2, _, _, info = load_sample_data(
-        dataset, 'test', analytical_fim=True, pi_derivatives=False,
-        sqrt_nr_descs=False, return_info=True)
-    pdb.set_trace()
-
-
 def test_evaluation(nr_threads):
     D, K = 64, 256
     dataset = Dataset('hollywood2', suffix='.per_slice.delta_60', nr_clusters=K)
