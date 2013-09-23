@@ -7,6 +7,7 @@ import os
 
 # from ipdb import set_trace
 from joblib import Memory
+from yael import threads
 
 from dataset import Dataset
 from fisher_vectors.evaluation import Evaluation
@@ -19,7 +20,7 @@ from load_data import load_sample_data
 
 # TODO Possible improvements:
 # [ ] Use sparse matrices for masks, especially for `video_agg_mask`.
-# [ ] Parallelize per-class evaluation.
+# [x] Parallelize per-class evaluation.
 
 
 cache_dir = os.path.expanduser('~/scratch2/tmp')
@@ -127,6 +128,16 @@ def aggregate(fisher_vectors, mask, nr_descriptors=None):
             np.dot(mask, nr_descriptors)[:, np.newaxis])
 
 
+def evaluate_worker(
+    (ii, eval, tr_data, te_data, te_labels, visual_word_mask, video_mask,
+    slice_vw_counts, slice_vw_l2_norms)):
+    true_labels = te_labels[:, ii]
+    weight, bias = compute_weights(eval.clf[ii], tr_data)
+    slice_vw_scores = visual_word_scores(te_data, weight, bias, visual_word_mask)
+    predictions = approximate_video_scores(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, video_mask)
+    return ii, average_precision(true_labels, predictions)
+
+
 def test_aggregate():
     dataset = Dataset('hollywood2', suffix='.per_slice.delta_60', nr_clusters=256)
     samples, _ = dataset.get_data('test')
@@ -140,7 +151,7 @@ def test_aggregate():
     pdb.set_trace()
 
 
-def test_evaluation():
+def test_evaluation(nr_threads):
     D, K = 64, 256
     dataset = Dataset('hollywood2', suffix='.per_slice.delta_60', nr_clusters=K)
 
@@ -161,26 +172,29 @@ def test_evaluation():
     video_mask = build_aggregation_mask(te_names)
     visual_word_mask = build_visual_word_mask(D, K)
 
-    fisher_vectors = scale_by(te_data, nr_descs, video_mask)
+    te_data = scale_by(te_data, nr_descs, video_mask)
     slice_vw_counts = scale_by(te_counts, nr_descs, video_mask)
-    slice_vw_l2_norms = visual_word_l2_norm(fisher_vectors, visual_word_mask)
+    slice_vw_l2_norms = visual_word_l2_norm(te_data, visual_word_mask)
 
-    ap = []
-    for ii in xrange(eval.nr_classes):
-        true_labels = te_labels[:, ii]
-        weight, bias = compute_weights(eval.clf[ii], tr_data)
-        slice_vw_scores = visual_word_scores(fisher_vectors, weight, bias, visual_word_mask)
-        predictions = approximate_video_scores(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, video_mask)
-        ap.append(average_precision(true_labels, predictions))
-        print "%.2f" % (100 * ap[-1])
+    evaluator = threads.ParallelIter(
+        nr_threads,
+        [(ii, eval, tr_data, te_data, te_labels, visual_word_mask,
+          video_mask, slice_vw_counts, slice_vw_l2_norms)
+         for ii in xrange(eval.nr_classes)], evaluate_worker)
 
-    print '-----'
-    print "%.2f" % (100 * np.mean(ap))
+    average_precisions = []
+    for ii, ap in evaluator:
+        average_precisions.append(ap)
+        print "%3d %5.2f" % (ii, 100 * ap)
+
+    print '---------'
+    print "mAP %.2f" % (100 * np.mean(average_precisions))
 
 
 def main():
-    test_evaluation()
+    test_evaluation(4)
 
 
 if __name__ == '__main__':
     main()
+
