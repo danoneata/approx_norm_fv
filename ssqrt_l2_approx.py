@@ -1,4 +1,5 @@
 """ Uses approximations for both signed square rooting and l2 normalization."""
+import argparse
 from multiprocessing import Pool
 import numpy as np
 import pdb
@@ -179,7 +180,16 @@ def test_evaluation(nr_threads):
 
 
 def main():
-    test_evaluation(4)
+    parser = argparse.ArgumentParser(
+        description="Evaluating the normalization approximations.")
+
+    parser.add_argument(
+        '-nt', '--nr_threads', type=int, default=1, help="number of threads.")
+    parser.add_argument(
+        '-v', '--verbose', action='count', help="verbosity level.")
+    args = parser.parse_args()
+
+    evaluation(nr_threads=args.nr_threads, verbose=args.verbose)
 
 
 if __name__ == '__main__':
