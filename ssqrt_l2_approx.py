@@ -109,7 +109,13 @@ def approximate_video_scores(
     sqrt_scores = np.sum(video_scores / np.sqrt(video_counts), axis=1)
     approx_l2_norm = np.sum(video_l2_norm / video_counts, axis=1)
 
-    return sqrt_scores #  / approx_l2_norm
+    return sqrt_scores / np.sqrt(approx_l2_norm)
+
+
+def compute_approx_l2_normalization(slice_l2_norms, slice_counts, video_mask):
+    video_l2_norm = np.dot(video_mask, slice_l2_norms)
+    video_counts = np.dot(video_mask, slice_counts)
+    return np.sum(video_l2_norm / video_counts, axis=1)
 
 
 @memory.cache
@@ -184,16 +190,30 @@ def evaluation(tr_l2_norm_type, load_dummy=False, nr_threads=4, verbose=0):
         tr_data, tr_labels, tr_counts, tr_l2_norms, tr_video_mask, tr_visual_word_mask = load_dummy_data(0)
 
 
-    tr_video_data = np.dot(tr_video_mask, tr_data)
+    tr_video_data_ = np.dot(tr_video_mask, tr_data)
     tr_video_counts = np.dot(tr_video_mask, tr_counts)
-    sqrt_tr_video_data = approximate_signed_sqrt(tr_video_data, tr_video_counts, pi_derivatives=False, verbose=verbose)
 
-    tr_kernel = np.dot(sqrt_tr_video_data, sqrt_tr_video_data.T)
-    
-    #tr_kernel_2, tr_labels_2, _, tr_data_2 = load_kernels(dataset, tr_norms=['sqrt_cnt'], analytical_fim=True, only_train=True)
+    if verbose:
+        print "Normalizing train data."
+
+    def l2_norm(type_):
+        if type_ == 'true':
+            l2 = compute_L2_normalization(tr_video_data)
+        elif type_ == 'approx':
+            l2 = compute_approx_l2_normalization(tr_l2_norms, tr_counts, tr_video_mask)
+        else:
+            assert False, "Unknown L2 norm type."
+        return np.sqrt(l2[:, np.newaxis])
+
+    tr_video_data = approximate_signed_sqrt(
+            tr_video_data_, tr_video_counts,
+            pi_derivatives=False, verbose=verbose)
+    tr_video_data = tr_video_data / l2_norm(tr_l2_norm_type)
+
+    tr_kernel = np.dot(tr_video_data, tr_video_data.T)
 
     if verbose > 1:
-        print '\tTrain data:   %dx%d.' % sqrt_tr_video_data.shape
+        print '\tTrain data:   %dx%d.' % tr_video_data.shape
         print '\tTrain kernel: %dx%d.' % tr_kernel.shape
 
     if verbose:
@@ -222,7 +242,7 @@ def evaluation(tr_l2_norm_type, load_dummy=False, nr_threads=4, verbose=0):
 
     evaluator = threads.ParallelIter(
         nr_threads,
-        [(ii, eval, sqrt_tr_video_data, te_data, te_labels, te_visual_word_mask, te_video_mask, te_counts, te_l2_norms)
+        [(ii, eval, tr_video_data, te_data, te_labels, te_visual_word_mask, te_video_mask, te_counts, te_l2_norms)
          for ii in xrange(eval.nr_classes)], evaluate_worker)
 
     average_precisions = []
