@@ -8,6 +8,7 @@ import os
 
 # from ipdb import set_trace
 from joblib import Memory
+from sklearn.datasets.samples_generator import make_blobs
 from yael import threads
 
 from dataset import Dataset
@@ -21,13 +22,33 @@ from load_data import load_sample_data
 
 
 # TODO Possible improvements:
+# [ ] Use also empirical standardization.
 # [ ] Use sparse matrices for masks, especially for `video_agg_mask`.
-# [ ] Load dummy data.
+# [x] Load dummy data.
 # [x] Parallelize per-class evaluation.
 
 
 cache_dir = os.path.expanduser('~/scratch2/tmp')
 memory = Memory(cachedir=cache_dir)
+
+
+def load_dummy_data(seed):
+    N_SAMPLES = 100
+    N_CENTERS = 5
+    N_FEATURES = 20
+    K, D = 2, 5
+
+    te_data, te_labels = make_blobs(
+        n_samples=N_SAMPLES, centers=N_CENTERS,
+        n_features=N_FEATURES, random_state=seed)
+
+    te_video_mask = np.eye(N_SAMPLES)
+    te_visual_word_mask = build_visual_word_mask(D, K)
+
+    te_counts = np.random.rand(N_SAMPLES, K)
+    te_l2_norms = np.dot(te_data ** 2, te_visual_word_mask)
+
+    return te_data, te_labels, te_counts, te_l2_norms, te_video_mask, te_visual_word_mask
 
 
 def compute_weights(clf, xx):
@@ -149,15 +170,19 @@ def evaluate_worker(
     return ii, average_precision(true_labels, predictions)
 
 
-def evaluation(nr_threads=4, verbose=0):
-    D, K = 64, 256
-    dataset = Dataset('hollywood2', suffix='.per_slice.delta_60', nr_clusters=K)
-
+def evaluation(tr_l2_norm_type, load_dummy=False, nr_threads=4, verbose=0):
     if verbose:
         print "Loading train data."
 
-    tr_samples, _ = dataset.get_data('train')
-    tr_data, tr_labels, tr_counts, tr_l2_norms, tr_video_mask, tr_visual_word_mask = load_slices(dataset, tr_samples)
+    if not load_dummy:
+        D, K = 64, 256
+        dataset = Dataset('hollywood2', suffix='.per_slice.delta_60', nr_clusters=K)
+
+        tr_samples, _ = dataset.get_data('train')
+        tr_data, tr_labels, tr_counts, tr_l2_norms, tr_video_mask, tr_visual_word_mask = load_slices(dataset, tr_samples)
+    else:
+        tr_data, tr_labels, tr_counts, tr_l2_norms, tr_video_mask, tr_visual_word_mask = load_dummy_data(0)
+
 
     tr_video_data = np.dot(tr_video_mask, tr_data)
     tr_video_counts = np.dot(tr_video_mask, tr_counts)
@@ -180,8 +205,12 @@ def evaluation(nr_threads=4, verbose=0):
     if verbose:
         print "Loading test data."
 
-    te_samples, _ = dataset.get_data('test')
-    te_data, te_labels, te_counts, te_l2_norms, te_video_mask, te_visual_word_mask = load_slices(dataset, te_samples)
+    if not load_dummy:
+        te_samples, _ = dataset.get_data('test')
+        te_data, te_labels, te_counts, te_l2_norms, te_video_mask, te_visual_word_mask = load_slices(dataset, te_samples)
+    else:
+        te_data, te_labels, te_counts, te_l2_norms, te_video_mask, te_visual_word_mask = load_dummy_data(1)
+
     te_labels = eval.lb.transform(te_labels)
 
     if verbose > 1:
@@ -209,12 +238,20 @@ def main():
         description="Evaluating the normalization approximations.")
 
     parser.add_argument(
+        '--dummy', action='store_true', default=False,
+        help="uses dummy data for quick testing.")
+    parser.add_argument(
+        '--train_l2_norm', choices={'true', 'approx'}, required=True,
+        help="how to apply L2 normalization at train time.")
+    parser.add_argument(
         '-nt', '--nr_threads', type=int, default=1, help="number of threads.")
     parser.add_argument(
         '-v', '--verbose', action='count', help="verbosity level.")
     args = parser.parse_args()
 
-    evaluation(nr_threads=args.nr_threads, verbose=args.verbose)
+    evaluation(
+        args.train_l2_norm, load_dummy=args.dummy, nr_threads=args.nr_threads,
+        verbose=args.verbose)
 
 
 if __name__ == '__main__':
