@@ -126,7 +126,7 @@ def load_kernels(
     return tr_kernel, tr_labels, te_kernel, te_labels
 
 
-def approximate_signed_sqrt(data, counts, pi_derivatives=False):
+def approximate_signed_sqrt(data, counts, pi_derivatives=False, verbose=0):
     Nc, K = counts.shape
     Nd, dim = data.shape
     D = (dim / K - (1 if pi_derivatives else 0)) / 2
@@ -139,10 +139,12 @@ def approximate_signed_sqrt(data, counts, pi_derivatives=False):
         sqrtQ.repeat(D, axis=1)))
     data = data / sqrtQ
 
+    if verbose > 1:
+        print '\tSquare rooting the counts'
+        print '\t\tNumber of infinite values', data[np.isinf(data)].size
+        print '\t\tNumber of NaN values', data[np.isnan(data)].size
+
     # Remove degenerated values.
-    print 'Square rooting the counts'
-    print '\tNumber of infinite values', data[np.isinf(data)].size
-    print '\tNumber of NaN values', data[np.isnan(data)].size
     data[np.isnan(data) | np.isinf(data)] = 0.
 
     return data
@@ -150,7 +152,8 @@ def approximate_signed_sqrt(data, counts, pi_derivatives=False):
 
 def plot_fisher_vector(xx, name='oo'):
     ii = np.argmax(np.abs(xx))
-    print "%10s -- maximum at %7d is %+.3f." % (name, ii, xx[ii])
+    print "\tPloting Fisher vector."
+    print "\t\t%30s -- maximum at %7d is %+.3f." % (name, ii, xx[ii])
     D = xx.size
     fig = plt.figure()
     ax = fig.add_subplot(111)

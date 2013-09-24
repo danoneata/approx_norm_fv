@@ -15,12 +15,14 @@ from fisher_vectors.evaluation import Evaluation
 from fisher_vectors.evaluation.utils import average_precision
 from fisher_vectors.model.utils import compute_L2_normalization
 
+from load_data import approximate_signed_sqrt
 from load_data import load_kernels
 from load_data import load_sample_data
 
 
 # TODO Possible improvements:
 # [ ] Use sparse matrices for masks, especially for `video_agg_mask`.
+# [ ] Load dummy data.
 # [x] Parallelize per-class evaluation.
 
 
@@ -114,11 +116,19 @@ def load_slices(dataset, samples):
         nd = info['nr_descs']
         nr_descs.append(nd[nd != 0])
 
+    D, K = 64, dataset.VOC_SIZE
     fisher_vectors = np.vstack(fisher_vectors)
     counts = np.vstack(counts)
     nr_descs = np.hstack(nr_descs)
 
-    return names, labels, fisher_vectors, counts, nr_descs
+    video_mask = build_aggregation_mask(names)
+    visual_word_mask = build_visual_word_mask(D, K)
+
+    fisher_vectors = scale_by(fisher_vectors, nr_descs, video_mask)
+    slice_vw_counts = scale_by(counts, nr_descs, video_mask)
+    slice_vw_l2_norms = visual_word_l2_norm(fisher_vectors, visual_word_mask)
+
+    return fisher_vectors, labels, slice_vw_counts, slice_vw_l2_norms, video_mask, visual_word_mask
 
 
 def aggregate(fisher_vectors, mask, nr_descriptors=None):
@@ -139,43 +149,58 @@ def evaluate_worker(
     return ii, average_precision(true_labels, predictions)
 
 
-def test_evaluation(nr_threads):
+def evaluation(nr_threads=4, verbose=0):
     D, K = 64, 256
     dataset = Dataset('hollywood2', suffix='.per_slice.delta_60', nr_clusters=K)
 
-    # Load data.
-    tr_kernel, tr_labels, scalers, tr_data = load_kernels(
-        dataset, tr_norms=['sqrt_cnt'], te_norms=[], analytical_fim=True,
-        pi_derivatives=False, sqrt_nr_descs=False, only_train=True)
+    if verbose:
+        print "Loading train data."
 
-    # Training.
+    tr_samples, _ = dataset.get_data('train')
+    tr_data, tr_labels, tr_counts, tr_l2_norms, tr_video_mask, tr_visual_word_mask = load_slices(dataset, tr_samples)
+
+    tr_video_data = np.dot(tr_video_mask, tr_data)
+    tr_video_counts = np.dot(tr_video_mask, tr_counts)
+    sqrt_tr_video_data = approximate_signed_sqrt(tr_video_data, tr_video_counts, pi_derivatives=False, verbose=verbose)
+
+    tr_kernel = np.dot(sqrt_tr_video_data, sqrt_tr_video_data.T)
+    
+    #tr_kernel_2, tr_labels_2, _, tr_data_2 = load_kernels(dataset, tr_norms=['sqrt_cnt'], analytical_fim=True, only_train=True)
+
+    if verbose > 1:
+        print '\tTrain data:   %dx%d.' % sqrt_tr_video_data.shape
+        print '\tTrain kernel: %dx%d.' % tr_kernel.shape
+
+    if verbose:
+        print "Training classifier."
+
     eval = Evaluation('hollywood2')
     eval.fit(tr_kernel, tr_labels)
 
-    # Evaluation.
+    if verbose:
+        print "Loading test data."
+
     te_samples, _ = dataset.get_data('test')
-    te_names, te_labels, te_data, te_counts, nr_descs = load_slices(dataset, te_samples)
+    te_data, te_labels, te_counts, te_l2_norms, te_video_mask, te_visual_word_mask = load_slices(dataset, te_samples)
     te_labels = eval.lb.transform(te_labels)
 
-    video_mask = build_aggregation_mask(te_names)
-    visual_word_mask = build_visual_word_mask(D, K)
+    if verbose > 1:
+        print "\tTest data (slices): %dx%d." % te_data.shape
+        print "\tNumber of samples: %d." % len(te_labels)
 
-    te_data = scale_by(te_data, nr_descs, video_mask)
-    slice_vw_counts = scale_by(te_counts, nr_descs, video_mask)
-    slice_vw_l2_norms = visual_word_l2_norm(te_data, visual_word_mask)
+    if verbose:
+        print "Evaluating on %d threads." % nr_threads
 
     evaluator = threads.ParallelIter(
         nr_threads,
-        [(ii, eval, tr_data, te_data, te_labels, visual_word_mask,
-          video_mask, slice_vw_counts, slice_vw_l2_norms)
+        [(ii, eval, sqrt_tr_video_data, te_data, te_labels, te_visual_word_mask, te_video_mask, te_counts, te_l2_norms)
          for ii in xrange(eval.nr_classes)], evaluate_worker)
 
     average_precisions = []
     for ii, ap in evaluator:
         average_precisions.append(ap)
-        print "%3d %5.2f" % (ii, 100 * ap)
-
-    print '---------'
+        if verbose: print "%3d %5.2f" % (ii, 100 * ap)
+    if verbose: print '---------'
     print "mAP %.2f" % (100 * np.mean(average_precisions))
 
 
