@@ -9,6 +9,7 @@ import os
 # from ipdb import set_trace
 from joblib import Memory
 from sklearn.datasets.samples_generator import make_blobs
+from sklearn.preprocessing import StandardScaler
 from yael import threads
 
 from dataset import Dataset
@@ -45,16 +46,19 @@ def load_dummy_data(seed):
     te_video_mask = np.eye(N_SAMPLES)
     te_visual_word_mask = build_visual_word_mask(D, K)
 
+    np.random.seed(seed)
     te_counts = np.random.rand(N_SAMPLES, K)
     te_l2_norms = np.dot(te_data ** 2, te_visual_word_mask)
 
     return te_data, te_labels, te_counts, te_l2_norms, te_video_mask, te_visual_word_mask
 
 
-def compute_weights(clf, xx):
-    return (
-        np.dot(clf.dual_coef_, xx[clf.support_]),
-        clf.intercept_)
+def compute_weights(clf, xx, tr_std=None):
+    weights = np.dot(clf.dual_coef_, xx[clf.support_])
+    bias = clf.intercept_
+    if tr_std is not None:
+        weights /= tr_std
+    return weights, bias
 
 
 def predict(yy, weights, bias):
@@ -167,16 +171,19 @@ def aggregate(fisher_vectors, mask, nr_descriptors=None):
 
 
 def evaluate_worker(
-    (ii, eval, tr_data, te_data, te_labels, visual_word_mask, video_mask,
-    slice_vw_counts, slice_vw_l2_norms)):
+    (ii, eval, tr_data, tr_std, te_data, te_labels, visual_word_mask,
+     video_mask, slice_vw_counts, slice_vw_l2_norms)):
     true_labels = te_labels[:, ii]
-    weight, bias = compute_weights(eval.clf[ii], tr_data)
+    weight, bias = compute_weights(eval.clf[ii], tr_data, tr_std)
     slice_vw_scores = visual_word_scores(te_data, weight, bias, visual_word_mask)
     predictions = approximate_video_scores(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, video_mask)
     return ii, average_precision(true_labels, predictions)
 
 
-def evaluation(tr_l2_norm_type, load_dummy=False, nr_threads=4, verbose=0):
+def evaluation(
+    tr_l2_norm_type, empirical_standardization, load_dummy=False, nr_threads=4,
+    verbose=0):
+
     if verbose:
         print "Loading train data."
 
@@ -205,9 +212,18 @@ def evaluation(tr_l2_norm_type, load_dummy=False, nr_threads=4, verbose=0):
             assert False, "Unknown L2 norm type."
         return np.sqrt(l2[:, np.newaxis])
 
+    # Approximate square rooting.
     tr_video_data = approximate_signed_sqrt(
             tr_video_data_, tr_video_counts,
             pi_derivatives=False, verbose=verbose)
+    if empirical_standardization:
+        # Keep standard deviations for empirical standardization.
+        scaler = StandardScaler(with_mean=False)
+        tr_video_data = scaler.fit_transform(tr_video_data)
+        tr_std = scaler.std_
+    else:
+        tr_std = None
+    # Some sort of L2 normalization, either "true" or "approx".
     tr_video_data = tr_video_data / l2_norm(tr_l2_norm_type)
 
     tr_kernel = np.dot(tr_video_data, tr_video_data.T)
@@ -242,7 +258,7 @@ def evaluation(tr_l2_norm_type, load_dummy=False, nr_threads=4, verbose=0):
 
     evaluator = threads.ParallelIter(
         nr_threads,
-        [(ii, eval, tr_video_data, te_data, te_labels, te_visual_word_mask, te_video_mask, te_counts, te_l2_norms)
+        [(ii, eval, tr_video_data, tr_std, te_data, te_labels, te_visual_word_mask, te_video_mask, te_counts, te_l2_norms)
          for ii in xrange(eval.nr_classes)], evaluate_worker)
 
     average_precisions = []
@@ -261,6 +277,9 @@ def main():
         '--dummy', action='store_true', default=False,
         help="uses dummy data for quick testing.")
     parser.add_argument(
+        '-e_std', '--empirical_standardization', default=False,
+        action='store_true', help="normalizes data to have unit variance.")
+    parser.add_argument(
         '--train_l2_norm', choices={'true', 'approx'}, required=True,
         help="how to apply L2 normalization at train time.")
     parser.add_argument(
@@ -270,7 +289,8 @@ def main():
     args = parser.parse_args()
 
     evaluation(
-        args.train_l2_norm, load_dummy=args.dummy, nr_threads=args.nr_threads,
+        args.train_l2_norm, args.empirical_standardization,
+        load_dummy=args.dummy, nr_threads=args.nr_threads,
         verbose=args.verbose)
 
 
