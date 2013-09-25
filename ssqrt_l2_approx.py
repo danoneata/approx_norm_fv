@@ -150,12 +150,6 @@ def approximate_video_scores(
     return sqrt_scores / np.sqrt(approx_l2_norm)
 
 
-def compute_approx_l2_normalization(slice_l2_norms, slice_counts, video_mask):
-    video_l2_norm = np.dot(video_mask, slice_l2_norms)
-    video_counts = np.dot(video_mask, slice_counts)
-    return np.sum(video_l2_norm / video_counts, axis=1)
-
-
 @memory.cache
 def load_slices(dataset, samples):
     counts = []
@@ -222,16 +216,40 @@ def evaluation(
         print "Loading train data."
 
     if src_cfg != 'dummy':
-        dataset = Dataset(CFG[src_cfg]['dataset_name'], **CFG[src_cfg]['dataset_params'])
-
+        dataset = Dataset(
+            CFG[src_cfg]['dataset_name'],
+            **CFG[src_cfg]['dataset_params'])
         tr_samples, _ = dataset.get_data('train')
-        tr_data, tr_labels, tr_counts, tr_l2_norms, tr_video_mask, tr_visual_word_mask = load_slices(dataset, tr_samples)
+        SAMPLES_CHUNK = 1000
+        NR_SAMPLES = len(tr_samples)
+        def loader(samples): return load_slices(dataset, samples)
+        def chunker():
+            for low in range(0, NR_SAMPLES, SAMPLES_CHUNK):
+                yield tr_samples[low: low + SAMPLES_CHUNK]
     else:
-        tr_data, tr_labels, tr_counts, tr_l2_norms, tr_video_mask, tr_visual_word_mask = load_dummy_data(0)
+        # Hack.
+        def loader(seed): return load_dummy_data(0)
+        def chunker(): yield 0
 
+    # Memory friendly loading: load data in small chunks and aggregated them in
+    tr_video_data = []
+    tr_video_counts = []
+    tr_video_l2_norms = []
+    tr_video_labels = []
 
-    tr_video_data_ = np.dot(tr_video_mask, tr_data)
-    tr_video_counts = np.dot(tr_video_mask, tr_counts)
+    # Fisher vectors for each video.
+    for samples in chunker():
+        (tr_data, tr_labels, tr_counts, tr_l2_norms, tr_video_mask,
+         tr_visual_word_mask) = loader(samples)
+
+        tr_video_data.append(np.dot(tr_video_mask, tr_data))
+        tr_video_counts.append(np.dot(tr_video_mask, tr_counts))
+        tr_video_l2_norms.append(np.dot(tr_video_mask, tr_l2_norms))
+        tr_video_labels += tr_labels
+
+    tr_video_data = np.hstack(tr_video_data)
+    tr_video_counts = np.hstack(tr_video_counts)
+    tr_video_l2_norms = np.hstack(tr_video_l2_norms)
 
     if verbose:
         print "Normalizing train data."
@@ -240,23 +258,25 @@ def evaluation(
         if type_ == 'true':
             l2 = compute_L2_normalization(tr_video_data)
         elif type_ == 'approx':
-            l2 = compute_approx_l2_normalization(tr_l2_norms, tr_counts, tr_video_mask)
+            l2 = np.sum(tr_video_l2_norms / tr_video_counts, axis=1)
         else:
             assert False, "Unknown L2 norm type."
         return np.sqrt(l2[:, np.newaxis])
 
-    # Approximate square rooting.
+    # Square rooting.
     tr_video_data = approximate_signed_sqrt(
-            tr_video_data_, tr_video_counts,
+            tr_video_data, tr_video_counts,
             pi_derivatives=False, verbose=verbose)
+
+    # Empirical standardization.
     if empirical_standardization:
-        # Keep standard deviations for empirical standardization.
         scaler = StandardScaler(with_mean=False)
         tr_video_data = scaler.fit_transform(tr_video_data)
         tr_std = scaler.std_
     else:
         tr_std = None
-    # Some sort of L2 normalization, either "true" or "approx".
+
+    # L2 normalization ("true" or "approx").
     tr_video_data = tr_video_data / l2_norm(tr_l2_norm_type)
 
     tr_kernel = np.dot(tr_video_data, tr_video_data.T)
