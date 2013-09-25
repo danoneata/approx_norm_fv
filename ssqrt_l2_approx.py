@@ -23,14 +23,48 @@ from load_data import load_sample_data
 
 
 # TODO Possible improvements:
-# [ ] Use also empirical standardization.
 # [ ] Use sparse matrices for masks, especially for `video_agg_mask`.
+# [x] Use also empirical standardization.
 # [x] Load dummy data.
 # [x] Parallelize per-class evaluation.
 
 
 cache_dir = os.path.expanduser('~/scratch2/tmp')
 memory = Memory(cachedir=cache_dir)
+
+CFG = {
+    'trecvid11_devt': {
+        'dataset_name': 'trecvid12',
+        'dataset_params': {
+            'ip_type': 'dense5.track15mbh',
+            'nr_clusters': 256,
+            'suffix': '.per_slice.small.delta_60.skip_1',
+        },
+        'eval_name': 'trecvid12',
+        'eval_params': {
+            'split': 'devt',
+        },
+    },
+    'hollywood2':{
+        'dataset_name': 'hollywood2',
+        'dataset_params': {
+            'ip_type': 'dense5.track15mbh',
+            'nr_clusters': 256,
+            'suffix': '.per_slice.delta_60'
+        },
+        'eval_name': 'hollywood2',
+        'eval_params': {
+        },
+    },
+    'dummy': {
+        'dataset_name': '',
+        'dataset_params': {
+        },
+        'eval_name': 'hollywood2',
+        'eval_params': {
+        },
+    }
+}
 
 
 def load_dummy_data(seed):
@@ -181,15 +215,14 @@ def evaluate_worker(
 
 
 def evaluation(
-    tr_l2_norm_type, empirical_standardization, load_dummy=False, nr_threads=4,
+    src_cfg, tr_l2_norm_type, empirical_standardization, nr_threads=4,
     verbose=0):
 
     if verbose:
         print "Loading train data."
 
-    if not load_dummy:
-        D, K = 64, 256
-        dataset = Dataset('hollywood2', suffix='.per_slice.delta_60', nr_clusters=K)
+    if src_cfg != 'dummy':
+        dataset = Dataset(CFG[src_cfg]['dataset_name'], **CFG[src_cfg]['dataset_params'])
 
         tr_samples, _ = dataset.get_data('train')
         tr_data, tr_labels, tr_counts, tr_l2_norms, tr_video_mask, tr_visual_word_mask = load_slices(dataset, tr_samples)
@@ -235,19 +268,20 @@ def evaluation(
     if verbose:
         print "Training classifier."
 
-    eval = Evaluation('hollywood2')
+    eval = Evaluation(CFG[src_cfg]['eval_name'], **CFG[src_cfg]['eval_params'])
     eval.fit(tr_kernel, tr_labels)
 
     if verbose:
         print "Loading test data."
 
-    if not load_dummy:
+    if src_cfg != 'dummy':
         te_samples, _ = dataset.get_data('test')
         te_data, te_labels, te_counts, te_l2_norms, te_video_mask, te_visual_word_mask = load_slices(dataset, te_samples)
     else:
         te_data, te_labels, te_counts, te_l2_norms, te_video_mask, te_visual_word_mask = load_dummy_data(1)
 
-    te_labels = eval.lb.transform(te_labels)
+    if src_cfg in ('hollywood2', 'dummy'):
+        te_labels = eval.lb.transform(te_labels)
 
     if verbose > 1:
         print "\tTest data (slices): %dx%d." % te_data.shape
@@ -274,8 +308,9 @@ def main():
         description="Evaluating the normalization approximations.")
 
     parser.add_argument(
-        '--dummy', action='store_true', default=False,
-        help="uses dummy data for quick testing.")
+        '-d', '--dataset', required=True,
+        choices={'trecvid11_devt', 'hollywood2', 'dummy'},
+        help="which dataset (use `dummy` for debugging purposes).")
     parser.add_argument(
         '-e_std', '--empirical_standardization', default=False,
         action='store_true', help="normalizes data to have unit variance.")
@@ -289,9 +324,8 @@ def main():
     args = parser.parse_args()
 
     evaluation(
-        args.train_l2_norm, args.empirical_standardization,
-        load_dummy=args.dummy, nr_threads=args.nr_threads,
-        verbose=args.verbose)
+        args.dataset, args.train_l2_norm, args.empirical_standardization,
+        nr_threads=args.nr_threads, verbose=args.verbose)
 
 
 if __name__ == '__main__':
