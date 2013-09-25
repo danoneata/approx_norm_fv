@@ -5,6 +5,7 @@ from multiprocessing import Pool
 import numpy as np
 import pdb
 import os
+from scipy import sparse
 import tempfile
 
 # from ipdb import set_trace
@@ -24,7 +25,7 @@ from load_data import load_sample_data
 
 
 # TODO Possible improvements:
-# [ ] Use sparse matrices for masks, especially for `video_agg_mask`.
+# [x] Use sparse matrices for masks.
 # [x] Use also empirical standardization.
 # [x] Load dummy data.
 # [x] Parallelize per-class evaluation.
@@ -91,12 +92,12 @@ def load_dummy_data(seed, outfile=None):
         n_samples=N_SAMPLES, centers=N_CENTERS,
         n_features=N_FEATURES, random_state=seed)
 
-    te_video_mask = np.eye(N_SAMPLES)
+    te_video_mask = sparse.csr_matrix(np.eye(N_SAMPLES))
     te_visual_word_mask = build_visual_word_mask(D, K)
 
     np.random.seed(seed)
     te_counts = np.random.rand(N_SAMPLES, K)
-    te_l2_norms = np.dot(te_data ** 2, te_visual_word_mask)
+    te_l2_norms = te_data ** 2 * te_visual_word_mask
 
     return (
         te_data, te_labels, te_counts, te_l2_norms, te_video_mask,
@@ -129,36 +130,36 @@ def build_aggregation_mask(names):
     mask = np.zeros((N, nn))
     mask[range(N), idxs] = 1
 
-    return mask.T
+    return sparse.csr_matrix(mask.T)
 
 
 def build_visual_word_mask(D, K):
     """ Mask to aggregate a Fisher vector into per visual word values. """
     I = np.eye(K)
-    return np.hstack((I.repeat(D, axis=1), I.repeat(D, axis=1))).T
+    mask = np.hstack((I.repeat(D, axis=1), I.repeat(D, axis=1))).T
+    return sparse.csr_matrix(mask)
 
 
 def scale_by(fisher_vectors, nr_descriptors, video_mask):
     return (
         fisher_vectors * nr_descriptors[:, np.newaxis]
-        / np.dot(np.dot(video_mask, nr_descriptors),
-                 video_mask)[:, np.newaxis])
+        / ((video_mask * nr_descriptors) * video_mask)[:, np.newaxis])
 
 
 def visual_word_l2_norm(fisher_vectors, visual_word_mask):
-    return np.dot(fisher_vectors ** 2, visual_word_mask)  # NxK
+    return fisher_vectors ** 2 * visual_word_mask  # NxK
 
 
 def visual_word_scores(fisher_vectors, weights, bias, visual_word_mask):
-    return np.dot(- fisher_vectors * weights, visual_word_mask)# + bias  # NxK
+    return (- fisher_vectors * weights) * visual_word_mask  # NxK
 
 
 def approximate_video_scores(
     slice_scores, slice_counts, slice_l2_norms, video_mask):
 
-    video_scores = np.dot(video_mask, slice_scores)
-    video_counts = np.dot(video_mask, slice_counts)
-    video_l2_norm = np.dot(video_mask, slice_l2_norms)
+    video_scores = video_mask * slice_scores
+    video_counts = video_mask * slice_counts
+    video_l2_norm = video_mask * slice_l2_norms
 
     sqrt_scores = np.sum(video_scores / np.sqrt(video_counts), axis=1)
     approx_l2_norm = np.sum(video_l2_norm / video_counts, axis=1)
@@ -216,8 +217,8 @@ def aggregate(fisher_vectors, mask, nr_descriptors=None):
     """ Aggregates per-slice data into per-video data. """
     if nr_descriptors is None:
         nr_descriptors = np.ones(mask.shape[1])
-    return (np.dot(mask, nr_descriptors[:, np.newaxis] * fisher_vectors) /
-            np.dot(mask, nr_descriptors)[:, np.newaxis])
+    return (mask * nr_descriptors[:, np.newaxis] * fisher_vectors /
+            mask * nr_descriptors[:, np.newaxis])
 
 
 def compute_average_precision(true_labels, predictions, verbose=0):
@@ -298,9 +299,9 @@ def evaluation(
          tr_visual_word_mask) = loader(
              samples, outfile=outfile % ('train', chunk_nr))
 
-        tr_video_data.append(np.dot(tr_video_mask, tr_data))
-        tr_video_counts.append(np.dot(tr_video_mask, tr_counts))
-        tr_video_l2_norms.append(np.dot(tr_video_mask, tr_l2_norms))
+        tr_video_data.append(tr_video_mask * tr_data)
+        tr_video_counts.append(tr_video_mask * tr_counts)
+        tr_video_l2_norms.append(tr_video_mask * tr_l2_norms)
         tr_video_labels += list(tr_labels)
 
     tr_video_data = np.vstack(tr_video_data)
