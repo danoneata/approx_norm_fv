@@ -1,9 +1,9 @@
 """ Uses approximations for both signed square rooting and l2 normalization."""
 import argparse
+from collections import defaultdict
 from multiprocessing import Pool
 import numpy as np
 import pdb
-from pdb import set_trace
 import os
 
 # from ipdb import set_trace
@@ -84,7 +84,11 @@ def load_dummy_data(seed):
     te_counts = np.random.rand(N_SAMPLES, K)
     te_l2_norms = np.dot(te_data ** 2, te_visual_word_mask)
 
-    return te_data, te_labels, te_counts, te_l2_norms, te_video_mask, te_visual_word_mask
+    te_labels = list(te_labels)
+
+    return (
+        te_data, te_labels, te_counts, te_l2_norms, te_video_mask,
+        te_visual_word_mask)
 
 
 def compute_weights(clf, xx, tr_std=None):
@@ -198,6 +202,25 @@ def aggregate(fisher_vectors, mask, nr_descriptors=None):
             np.dot(mask, nr_descriptors)[:, np.newaxis])
 
 
+def compute_average_precision(true_labels, predictions, verbose=0):
+    average_precisions = []
+    for ii in sorted(true_labels.keys()):
+
+        tl = np.hstack(true_labels[ii]).squeeze()
+        pd = np.hstack(predictions[ii]).squeeze()
+
+        ap = average_precision(tl, pd)
+        average_precisions.append(ap)
+
+        if verbose:
+            print "%3d %5.2f" % (ii, 100 * ap)
+
+    if verbose:
+        print '---------'
+
+    print "mAP %.2f" % (100 * np.mean(average_precisions))
+
+
 def evaluate_worker(
     (ii, eval, tr_data, tr_std, te_data, te_labels, visual_word_mask,
      video_mask, slice_vw_counts, slice_vw_l2_norms)):
@@ -205,7 +228,7 @@ def evaluate_worker(
     weight, bias = compute_weights(eval.clf[ii], tr_data, tr_std)
     slice_vw_scores = visual_word_scores(te_data, weight, bias, visual_word_mask)
     predictions = approximate_video_scores(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, video_mask)
-    return ii, average_precision(true_labels, predictions)
+    return ii, true_labels, predictions
 
 
 def evaluation(
@@ -215,21 +238,32 @@ def evaluation(
     if verbose:
         print "Loading train data."
 
+    def chunker(samples, chunk_size):
+        nr_samples = len(samples)
+        for low in range(0, nr_samples, chunk_size):
+            yield samples[low: low + chunk_size]
+
     if src_cfg != 'dummy':
         dataset = Dataset(
             CFG[src_cfg]['dataset_name'],
             **CFG[src_cfg]['dataset_params'])
+
         tr_samples, _ = dataset.get_data('train')
-        SAMPLES_CHUNK = 1000
-        NR_SAMPLES = len(tr_samples)
-        def loader(samples): return load_slices(dataset, samples)
-        def chunker():
-            for low in range(0, NR_SAMPLES, SAMPLES_CHUNK):
-                yield tr_samples[low: low + SAMPLES_CHUNK]
-    else:
-        # Hack.
-        def loader(seed): return load_dummy_data(0)
-        def chunker(): yield 0
+        te_samples, _ = dataset.get_data('test')
+
+        samples_chunk = 1000
+
+        def loader(samples):
+            return load_slices(dataset, samples)
+
+    else: # Hack.
+        tr_samples = [0, 2]
+        te_samples = [1, 3]
+
+        samples_chunk = 1
+
+        def loader(seeds):
+            return load_dummy_data(seeds[0])
 
     # Memory friendly loading: load data in small chunks and aggregated them in
     tr_video_data = []
@@ -238,7 +272,7 @@ def evaluation(
     tr_video_labels = []
 
     # Fisher vectors for each video.
-    for samples in chunker():
+    for samples in chunker(tr_samples, samples_chunk):
         (tr_data, tr_labels, tr_counts, tr_l2_norms, tr_video_mask,
          tr_visual_word_mask) = loader(samples)
 
@@ -247,9 +281,9 @@ def evaluation(
         tr_video_l2_norms.append(np.dot(tr_video_mask, tr_l2_norms))
         tr_video_labels += tr_labels
 
-    tr_video_data = np.hstack(tr_video_data)
-    tr_video_counts = np.hstack(tr_video_counts)
-    tr_video_l2_norms = np.hstack(tr_video_l2_norms)
+    tr_video_data = np.vstack(tr_video_data)
+    tr_video_counts = np.vstack(tr_video_counts)
+    tr_video_l2_norms = np.vstack(tr_video_l2_norms)
 
     if verbose:
         print "Normalizing train data."
@@ -289,38 +323,41 @@ def evaluation(
         print "Training classifier."
 
     eval = Evaluation(CFG[src_cfg]['eval_name'], **CFG[src_cfg]['eval_params'])
-    eval.fit(tr_kernel, tr_labels)
+    eval.fit(tr_kernel, tr_video_labels)
 
     if verbose:
         print "Loading test data."
 
-    if src_cfg != 'dummy':
-        te_samples, _ = dataset.get_data('test')
-        te_data, te_labels, te_counts, te_l2_norms, te_video_mask, te_visual_word_mask = load_slices(dataset, te_samples)
-    else:
-        te_data, te_labels, te_counts, te_l2_norms, te_video_mask, te_visual_word_mask = load_dummy_data(1)
+    true_labels = defaultdict(list)
+    predictions = defaultdict(list)
 
-    if src_cfg in ('hollywood2', 'dummy'):
-        te_labels = eval.lb.transform(te_labels)
+    for samples in chunker(te_samples, samples_chunk):
+        # Load slice of test data.
+        (te_data, te_labels, te_counts, te_l2_norms, te_video_mask,
+         te_visual_word_mask) = loader(samples)
 
-    if verbose > 1:
-        print "\tTest data (slices): %dx%d." % te_data.shape
-        print "\tNumber of samples: %d." % len(te_labels)
+        if src_cfg in ('hollywood2', 'dummy'):
+            te_labels = eval.lb.transform(te_labels)
 
-    if verbose:
-        print "Evaluating on %d threads." % nr_threads
+        if verbose > 1:
+            print "\tTest data: %dx%d." % te_data.shape
+            print "\tNumber of samples: %d." % len(te_labels)
 
-    evaluator = threads.ParallelIter(
-        nr_threads,
-        [(ii, eval, tr_video_data, tr_std, te_data, te_labels, te_visual_word_mask, te_video_mask, te_counts, te_l2_norms)
-         for ii in xrange(eval.nr_classes)], evaluate_worker)
+        if verbose:
+            print "Evaluating on %d threads." % nr_threads
 
-    average_precisions = []
-    for ii, ap in evaluator:
-        average_precisions.append(ap)
-        if verbose: print "%3d %5.2f" % (ii, 100 * ap)
-    if verbose: print '---------'
-    print "mAP %.2f" % (100 * np.mean(average_precisions))
+        evaluator = threads.ParallelIter(
+            nr_threads,
+            [(ii, eval, tr_video_data, tr_std, te_data, te_labels,
+              te_visual_word_mask, te_video_mask, te_counts, te_l2_norms)
+             for ii in xrange(eval.nr_classes)], evaluate_worker)
+
+        for ii, tl, pd in evaluator:
+            true_labels[ii].append(tl)
+            predictions[ii].append(pd)
+
+    # Score results.
+    compute_average_precision(true_labels, predictions, verbose=verbose)
 
 
 def main():
