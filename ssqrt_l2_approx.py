@@ -5,6 +5,7 @@ from multiprocessing import Pool
 import numpy as np
 import pdb
 import os
+import tempfile
 
 # from ipdb import set_trace
 from joblib import Memory
@@ -30,8 +31,6 @@ from load_data import load_sample_data
 
 
 cache_dir = os.path.expanduser('~/scratch2/tmp')
-memory = Memory(cachedir=cache_dir)
-
 CFG = {
     'trecvid11_devt': {
         'dataset_name': 'trecvid12',
@@ -50,7 +49,7 @@ CFG = {
         'dataset_params': {
             'ip_type': 'dense5.track15mbh',
             'nr_clusters': 256,
-            'suffix': '.per_slice.delta_60'
+            'suffix': '.per_slice.delta_60',
         },
         'eval_name': 'hollywood2',
         'eval_params': {
@@ -67,7 +66,22 @@ CFG = {
 }
 
 
-def load_dummy_data(seed):
+def my_cacher(func):
+    def wrapped(*args, **kwargs):
+        outfile = kwargs.get('outfile', tempfile.mkstemp()[1])
+        if os.path.exists(outfile):
+            with open(outfile, 'r') as ff:
+                return np.load(ff)
+        else:
+            result = func(*args, **kwargs)
+            with open(outfile, 'w') as ff:
+                np.save(ff, result)
+            return result
+    return wrapped
+
+
+@my_cacher
+def load_dummy_data(seed, outfile=None):
     N_SAMPLES = 100
     N_CENTERS = 5
     N_FEATURES = 20
@@ -83,8 +97,6 @@ def load_dummy_data(seed):
     np.random.seed(seed)
     te_counts = np.random.rand(N_SAMPLES, K)
     te_l2_norms = np.dot(te_data ** 2, te_visual_word_mask)
-
-    te_labels = list(te_labels)
 
     return (
         te_data, te_labels, te_counts, te_l2_norms, te_video_mask,
@@ -154,8 +166,8 @@ def approximate_video_scores(
     return sqrt_scores / np.sqrt(approx_l2_norm)
 
 
-@memory.cache
-def load_slices(dataset, samples):
+@my_cacher
+def load_slices(dataset, samples, outfile=None, verbose=0):
     counts = []
     fisher_vectors = []
     labels = []
@@ -163,6 +175,7 @@ def load_slices(dataset, samples):
     nr_descs = []
 
     for jj, sample in enumerate(samples):
+
         fv, ii, cc, info = load_sample_data(
             dataset, sample, analytical_fim=True, pi_derivatives=False,
             sqrt_nr_descs=False, return_info=True)
@@ -179,6 +192,9 @@ def load_slices(dataset, samples):
         nd = info['nr_descs']
         nr_descs.append(nd[nd != 0])
 
+        if verbose:
+            print '%5d %5d %s' % (jj, nn, sample.movie)
+
     D, K = 64, dataset.VOC_SIZE
     fisher_vectors = np.vstack(fisher_vectors)
     counts = np.vstack(counts)
@@ -191,7 +207,9 @@ def load_slices(dataset, samples):
     slice_vw_counts = scale_by(counts, nr_descs, video_mask)
     slice_vw_l2_norms = visual_word_l2_norm(fisher_vectors, visual_word_mask)
 
-    return fisher_vectors, labels, slice_vw_counts, slice_vw_l2_norms, video_mask, visual_word_mask
+    return (
+        fisher_vectors, np.array(labels), slice_vw_counts, slice_vw_l2_norms,
+        video_mask, visual_word_mask)
 
 
 def aggregate(fisher_vectors, mask, nr_descriptors=None):
@@ -243,6 +261,8 @@ def evaluation(
         for low in range(0, nr_samples, chunk_size):
             yield samples[low: low + chunk_size]
 
+    outfile = ('/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_%s_%d.dat')
+
     if src_cfg != 'dummy':
         dataset = Dataset(
             CFG[src_cfg]['dataset_name'],
@@ -253,8 +273,9 @@ def evaluation(
 
         samples_chunk = 1000
 
-        def loader(samples):
-            return load_slices(dataset, samples)
+        def loader(samples, outfile):
+            return load_slices(
+                dataset, samples, outfile=outfile, verbose=verbose)
 
     else: # Hack.
         tr_samples = [0, 2]
@@ -262,8 +283,8 @@ def evaluation(
 
         samples_chunk = 1
 
-        def loader(seeds):
-            return load_dummy_data(seeds[0])
+        def loader(seeds, outfile):
+            return load_dummy_data(seeds[0], outfile=outfile)
 
     # Memory friendly loading: load data in small chunks and aggregated them in
     tr_video_data = []
@@ -272,14 +293,15 @@ def evaluation(
     tr_video_labels = []
 
     # Fisher vectors for each video.
-    for samples in chunker(tr_samples, samples_chunk):
+    for chunk_nr, samples in enumerate(chunker(tr_samples, samples_chunk)):
         (tr_data, tr_labels, tr_counts, tr_l2_norms, tr_video_mask,
-         tr_visual_word_mask) = loader(samples)
+         tr_visual_word_mask) = loader(
+             samples, outfile=outfile % ('train', chunk_nr))
 
         tr_video_data.append(np.dot(tr_video_mask, tr_data))
         tr_video_counts.append(np.dot(tr_video_mask, tr_counts))
         tr_video_l2_norms.append(np.dot(tr_video_mask, tr_l2_norms))
-        tr_video_labels += tr_labels
+        tr_video_labels += list(tr_labels)
 
     tr_video_data = np.vstack(tr_video_data)
     tr_video_counts = np.vstack(tr_video_counts)
@@ -331,10 +353,11 @@ def evaluation(
     true_labels = defaultdict(list)
     predictions = defaultdict(list)
 
-    for samples in chunker(te_samples, samples_chunk):
+    for chunk_nr, samples in enumerate(chunker(te_samples, samples_chunk)):
         # Load slice of test data.
         (te_data, te_labels, te_counts, te_l2_norms, te_video_mask,
-         te_visual_word_mask) = loader(samples)
+         te_visual_word_mask) = loader(
+             samples, outfile=outfile % ('test', chunk_nr))
 
         if src_cfg in ('hollywood2', 'dummy'):
             te_labels = eval.lb.transform(te_labels)
