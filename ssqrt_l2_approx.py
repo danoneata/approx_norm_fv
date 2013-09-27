@@ -14,6 +14,7 @@ import tempfile
 # from ipdb import set_trace
 from joblib import Memory
 from sklearn.datasets.samples_generator import make_blobs
+from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler
 from yael import threads
 
@@ -28,6 +29,7 @@ from load_data import load_sample_data
 
 
 # TODO Possible improvements:
+# [ ] Evaluate with the exact normalizations.
 # [ ] Pre-allocate test data (counts, L2 norms and scores).
 # [x] Use sparse matrices for masks.
 # [x] Use also empirical standardization.
@@ -48,6 +50,7 @@ CFG = {
         'eval_params': {
             'split': 'devt',
         },
+        'metric': 'average_precision',
     },
     'hollywood2':{
         'dataset_name': 'hollywood2',
@@ -59,6 +62,7 @@ CFG = {
         'eval_name': 'hollywood2',
         'eval_params': {
         },
+        'metric': 'average_precision',
     },
     'dummy': {
         'dataset_name': '',
@@ -67,7 +71,20 @@ CFG = {
         'eval_name': 'hollywood2',
         'eval_params': {
         },
-    }
+        'metric': 'accuracy',
+    },
+    'hmdb_split1':{
+        'dataset_name': 'hmdb_split1',
+        'dataset_params': {
+            'ip_type': 'dense5.track15mbh',
+            'nr_clusters': 256,
+            'suffix': '.per_slice.delta_30',
+        },
+        'eval_name': 'hmdb',
+        'eval_params': {
+        },
+        'metric': 'accuracy',
+    },
 }
 
 
@@ -371,10 +388,7 @@ def compute_average_precision(true_labels, predictions, verbose=0):
     average_precisions = []
     for ii in sorted(true_labels.keys()):
 
-        tl = np.hstack(true_labels[ii]).squeeze()
-        pd = np.hstack(predictions[ii]).squeeze()
-
-        ap = average_precision(tl, pd)
+        ap = average_precision(true_labels[ii], predictions[ii])
         average_precisions.append(ap)
 
         if verbose:
@@ -383,15 +397,30 @@ def compute_average_precision(true_labels, predictions, verbose=0):
     if verbose:
         print '----------'
 
-    print "mAP %.2f" % (100 * np.mean(average_precisions))
+    print "mAP %6.2f" % (100 * np.mean(average_precisions))
 
 
-def evaluate_worker((cls, eval, tr_data, tr_std, fisher_vectors, slice_vw_counts, slice_vw_l2_norms, video_mask, visual_word_mask, outfile, verbose)):
+def compute_accuracy(label_binarizer, true_labels, predictions, verbose=0):
+    all_predictions = np.vstack((predictions[ii] for ii in sorted(predictions.keys())))
+    all_true_labels = np.vstack((true_labels[ii] for ii in sorted(true_labels.keys())))
 
-    weight, bias = compute_weights(eval.clf[cls], tr_data, tr_std)
+    label_binarizer.multilabel = False
+    array_true_labels = label_binarizer.inverse_transform(all_true_labels.T)
+
+    predicted_class = np.argmax(all_predictions, axis=0)
+    print "Accuracy %6.2f" % (100 * accuracy_score(array_true_labels, predicted_class))
+
+
+def evaluate_worker((
+    cls, eval, tr_data, tr_std, fisher_vectors, slice_vw_counts,
+    slice_vw_l2_norms, video_mask, visual_word_mask, outfile, verbose)):
+
+    clf = eval.get_classifier(cls)
+    weight, bias = compute_weights(clf, tr_data, tr_std)
     slice_vw_scores = visual_word_scores(fisher_vectors, weight, bias, visual_word_mask)
 
     predictions = approximate_video_scores(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, video_mask)
+    predictions += bias
 
     if verbose > 1:
         print cls,
@@ -450,7 +479,11 @@ def evaluation(
         if type_ == 'true':
             l2 = compute_L2_normalization(tr_video_data)
         elif type_ == 'approx':
-            l2 = np.sum(tr_video_l2_norms / tr_video_counts, axis=1)
+            zero_idxs = tr_video_counts == 0
+            masked_norms = np.ma.masked_array(tr_video_l2_norms, zero_idxs)
+            masked_counts = np.ma.masked_array(tr_video_counts, zero_idxs)
+            masked_result = masked_norms / masked_counts
+            l2 = np.sum(masked_result.filled(0), axis=1)
         else:
             assert False, "Unknown L2 norm type."
         return np.sqrt(l2[:, np.newaxis])
@@ -513,8 +546,19 @@ def evaluation(
             predictions[ii].append(pd)
         if verbose > 1: print 
 
+    # Prepare labels.
+    for cls in true_labels.keys(): 
+        true_labels[cls] = np.hstack(true_labels[cls]).squeeze()
+        predictions[cls] = np.hstack(predictions[cls]).squeeze()
+
     # Score results.
-    compute_average_precision(true_labels, predictions, verbose=verbose)
+    metric = CFG[src_cfg]['metric']
+    if metric == 'average_precision':
+        compute_average_precision(true_labels, predictions, verbose=verbose)
+    elif metric == 'accuracy':
+        compute_accuracy(eval.lb, true_labels, predictions, verbose=verbose)
+    else:
+        assert False, "Unknown metric %s." % metric
 
 
 def main():
@@ -523,7 +567,7 @@ def main():
 
     parser.add_argument(
         '-d', '--dataset', required=True,
-        choices={'trecvid11_devt', 'hollywood2', 'dummy'},
+        choices={'trecvid11_devt', 'hollywood2', 'dummy', 'hmdb_split1'},
         help="which dataset (use `dummy` for debugging purposes).")
     parser.add_argument(
         '-e_std', '--empirical_standardization', default=False,
