@@ -1,7 +1,10 @@
 """ Uses approximations for both signed square rooting and l2 normalization."""
 import argparse
 from collections import defaultdict
+import cPickle
+import functools
 from multiprocessing import Pool
+from itertools import izip
 import numpy as np
 import pdb
 import os
@@ -25,6 +28,7 @@ from load_data import load_sample_data
 
 
 # TODO Possible improvements:
+# [ ] Pre-allocate test data (counts, L2 norms and scores).
 # [x] Use sparse matrices for masks.
 # [x] Use also empirical standardization.
 # [x] Load dummy data.
@@ -67,22 +71,51 @@ CFG = {
 }
 
 
-def my_cacher(func):
-    def wrapped(*args, **kwargs):
-        outfile = kwargs.get('outfile', tempfile.mkstemp()[1])
-        if os.path.exists(outfile):
-            with open(outfile, 'r') as ff:
-                return np.load(ff)
+LOAD_SAMPLE_DATA_PARAMS = {
+    'analytical_fim' : True,
+    'pi_derivatives' : False,
+    'sqrt_nr_descs'  : False,
+    'return_info'    : True,
+}
+
+
+def my_cacher(store_format):
+    def loader(file, format):
+        if format in ('cp', 'cPickle'):
+            result = cPickle.load(file)
+        elif format in ('np', 'numpy'):
+            result = np.load(file)
         else:
-            result = func(*args, **kwargs)
-            with open(outfile, 'w') as ff:
-                np.save(ff, result)
-            return result
-    return wrapped
+            assert False
+        return result
+
+    def dumper(file, result, format):
+        if format in ('cp', 'cPickle'):
+            cPickle.dump(result, file)
+        elif format in ('np', 'numpy'):
+            np.save(file, result)
+        else:
+            assert False
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapped(*args, **kwargs):
+            outfile = kwargs.get('outfile', tempfile.mkstemp()[1])
+            if os.path.exists(outfile):
+                with open(outfile, 'r') as ff:
+                    return [loader(ff, sf) for sf in store_format]
+            else:
+                result = func(*args, **kwargs)
+                with open(outfile, 'w') as ff:
+                    for rr, sf in izip(result, store_format):
+                        dumper(ff, rr, sf)
+                return result
+        return wrapped
+    return decorator
 
 
-@my_cacher
-def load_dummy_data(seed, outfile=None):
+@my_cacher(['np', 'cp', 'np', 'np', 'cp', 'cp'])
+def load_dummy_data(seed, store_format=None, outfile=None):
     N_SAMPLES = 100
     N_CENTERS = 5
     N_FEATURES = 20
@@ -98,6 +131,7 @@ def load_dummy_data(seed, outfile=None):
     np.random.seed(seed)
     te_counts = np.random.rand(N_SAMPLES, K)
     te_l2_norms = te_data ** 2 * te_visual_word_mask
+    te_labels = list(te_labels)
 
     return (
         te_data, te_labels, te_counts, te_l2_norms, te_video_mask,
@@ -140,10 +174,15 @@ def build_visual_word_mask(D, K):
     return sparse.csr_matrix(mask)
 
 
-def scale_by(fisher_vectors, nr_descriptors, video_mask):
-    return (
-        fisher_vectors * nr_descriptors[:, np.newaxis]
-        / ((video_mask * nr_descriptors) * video_mask)[:, np.newaxis])
+def scale_by(fisher_vectors, nr_descriptors, video_mask=None):
+    if video_mask is None:
+        return (
+            fisher_vectors * nr_descriptors[:, np.newaxis]
+            / np.sum(nr_descriptors))
+    else:
+        return (
+            fisher_vectors * nr_descriptors[:, np.newaxis]
+            / ((video_mask * nr_descriptors) * video_mask)[:, np.newaxis])
 
 
 def visual_word_l2_norm(fisher_vectors, visual_word_mask):
@@ -167,7 +206,7 @@ def approximate_video_scores(
     return sqrt_scores / np.sqrt(approx_l2_norm)
 
 
-@my_cacher
+@my_cacher(['np', 'cp', 'np', 'np', 'cp', 'cp'])
 def load_slices(dataset, samples, outfile=None, verbose=0):
     counts = []
     fisher_vectors = []
@@ -209,16 +248,119 @@ def load_slices(dataset, samples, outfile=None, verbose=0):
     slice_vw_l2_norms = visual_word_l2_norm(fisher_vectors, visual_word_mask)
 
     return (
-        fisher_vectors, np.array(labels), slice_vw_counts, slice_vw_l2_norms,
+        fisher_vectors, labels, slice_vw_counts, slice_vw_l2_norms,
         video_mask, visual_word_mask)
 
 
-def aggregate(fisher_vectors, mask, nr_descriptors=None):
+@my_cacher(['np', 'cp', 'np', 'np'])
+def load_train_video_data(dataset, outfile=None, verbose=0):
+    samples, _ = dataset.get_data('train')
+    nr_samples = len(samples)
+
+    D, K = 64, dataset.VOC_SIZE
+    vw_mask = build_visual_word_mask(D, K)
+
+    # Pre-allocate.
+    data = np.zeros((nr_samples, 2 * D * K), dtype=np.float32)
+    counts = np.zeros((nr_samples, K), dtype=np.float32)
+    l2_norms = np.zeros((nr_samples, K), dtype=np.float32)
+    labels = []
+
+    ii = 0
+    seen_samples = []
+
+    for sample in samples:
+
+        if sample.movie in seen_samples:
+            continue
+        seen_samples.append(sample.movie)
+
+        fisher_vectors, _, slice_counts, info = load_sample_data(
+            dataset, sample, **LOAD_SAMPLE_DATA_PARAMS)
+        nr_descriptors = info['nr_descs']
+        nr_descriptors = nr_descriptors[nr_descriptors != 0]
+
+        fisher_vectors = scale_by(fisher_vectors, nr_descriptors)
+        slice_counts = scale_by(slice_counts, nr_descriptors)
+
+        data[ii] = aggregate(fisher_vectors)
+        counts[ii] = aggregate(slice_counts)
+        l2_norms[ii] = aggregate(visual_word_l2_norm(fisher_vectors, vw_mask))
+
+        labels.append(info['label'])
+
+        if verbose:
+            print '%5d %5d %s' % (ii, len(nr_descriptors), sample.movie)
+
+        ii += 1
+
+    # The counter `ii` can be smaller than `nr_samples` when there are
+    # duplicates in the `samples` as is the case of Hollywood2.
+    return data[:ii], labels[:ii], counts[:ii], l2_norms[:ii]
+
+
+@my_cacher(['np', 'np', 'np', 'cp', 'cp'])
+def load_test_data(dataset, weight, outfile=None, verbose=0):
+    samples, _ = dataset.get_data('test')
+
+    D, K = 64, dataset.VOC_SIZE
+    visual_word_mask = build_visual_word_mask(D, K)
+
+    slice_vw_scores = []
+    slice_vw_counts = []
+    slice_vw_l2_norms = []
+    labels = []
+    idxs = []
+
+    ii = 0
+    seen_samples = []
+
+    for sample in samples:
+
+        if sample.movie in seen_samples:
+            continue
+        seen_samples.append(sample.movie)
+
+        fisher_vectors, _, slice_counts, info = load_sample_data(
+            dataset, sample, **LOAD_SAMPLE_DATA_PARAMS)
+        nr_descriptors = info['nr_descs']
+        nr_descriptors = nr_descriptors[nr_descriptors != 0]
+        nn = len(nr_descriptors)
+
+        fisher_vectors = scale_by(fisher_vectors, nr_descriptors)
+        slice_counts = scale_by(slice_counts, nr_descriptors)
+
+        slice_vw_scores.append(visual_word_scores(fisher_vectors, weight, 0, visual_word_mask))
+        slice_vw_counts.append(slice_counts)
+        slice_vw_l2_norms.append(visual_word_l2_norm(fisher_vectors, visual_word_mask))
+
+        labels.append(info['label'])
+        idxs += [ii] * nn
+
+        if verbose > 2:
+            print '%5d %5d %s' % (ii, nn, sample.movie)
+
+        ii += 1
+
+    slice_vw_scores = np.vstack(slice_vw_scores)
+    slice_vw_counts = np.vstack(slice_vw_counts)
+    slice_vw_l2_norms = np.vstack(slice_vw_l2_norms)
+
+    return slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, idxs, labels
+
+
+def aggregate(data, mask=None, scale=None):
     """ Aggregates per-slice data into per-video data. """
-    if nr_descriptors is None:
-        nr_descriptors = np.ones(mask.shape[1])
-    return (mask * nr_descriptors[:, np.newaxis] * fisher_vectors /
-            mask * nr_descriptors[:, np.newaxis])
+    if mask is None and scale is None:
+        return np.sum(data, axis=0)
+    elif mask is None:
+        return np.sum(
+            scale[:, np.newaxis] * data /
+            np.sum(scale), axis=0)
+    elif scale is None:
+        scale = np.ones(mask.shape[1])
+        return (mask * scale[:, np.newaxis] * data /
+                mask * scale[:, np.newaxis])
 
 
 def compute_average_precision(true_labels, predictions, verbose=0):
@@ -240,14 +382,22 @@ def compute_average_precision(true_labels, predictions, verbose=0):
     print "mAP %.2f" % (100 * np.mean(average_precisions))
 
 
-def evaluate_worker(
-    (ii, eval, tr_data, tr_std, te_data, te_labels, visual_word_mask,
-     video_mask, slice_vw_counts, slice_vw_l2_norms)):
-    true_labels = te_labels[:, ii]
-    weight, bias = compute_weights(eval.clf[ii], tr_data, tr_std)
-    slice_vw_scores = visual_word_scores(te_data, weight, bias, visual_word_mask)
+def evaluate_worker((cls, eval, tr_data, tr_std, fisher_vectors, slice_vw_counts, slice_vw_l2_norms, video_mask, visual_word_mask, outfile, verbose)):
+
+    weight, bias = compute_weights(eval.clf[cls], tr_data, tr_std)
+    slice_vw_scores = visual_word_scores(fisher_vectors, weight, bias, visual_word_mask)
+
+    #(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms,
+    # idxs, te_labels) = load_test_data(dataset, weight, outfile=outfile, verbose=verbose)
+    #video_mask = build_aggregation_mask(idxs)
+
     predictions = approximate_video_scores(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, video_mask)
-    return ii, true_labels, predictions
+    #true_labels = eval.lb.transform(te_labels)[:, cls]
+
+    if verbose > 1:
+        print "\tClass", cls
+
+    return cls, predictions
 
 
 def evaluation(
@@ -257,59 +407,29 @@ def evaluation(
     if verbose:
         print "Loading train data."
 
-    def chunker(samples, chunk_size):
-        nr_samples = len(samples)
-        for low in range(0, nr_samples, chunk_size):
-            yield samples[low: low + chunk_size]
-
-    outfile = ('/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_%s_%d.dat')
+    tr_outfile = ('/scratch2/clear/oneata/tmp/joblib/%s_train.dat' % src_cfg)
+    te_outfile = ('/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_test_%d.dat')
 
     if src_cfg != 'dummy':
         dataset = Dataset(
             CFG[src_cfg]['dataset_name'],
             **CFG[src_cfg]['dataset_params'])
-
-        tr_samples, _ = dataset.get_data('train')
-        te_samples, _ = dataset.get_data('test')
-
-        samples_chunk = 1000
-
-        def loader(samples, outfile):
-            return load_slices(
-                dataset, samples, outfile=outfile, verbose=verbose)
-
+        def train_loader(outfile):
+            return load_train_video_data(dataset, outfile=outfile, verbose=verbose)
     else: # Hack.
-        tr_samples = [0, 2]
-        te_samples = [1, 3]
+        def train_loader(outfile):
+            data, labels, counts, l2_norms, _, _ = load_dummy_data(0, outfile=outfile)
+            return data, labels, counts, l2_norms
 
-        samples_chunk = 1
-
-        def loader(seeds, outfile):
-            return load_dummy_data(seeds[0], outfile=outfile)
-
-    # Memory friendly loading: load data in small chunks and aggregated them in
-    tr_video_data = []
-    tr_video_counts = []
-    tr_video_l2_norms = []
-    tr_video_labels = []
-
-    # Fisher vectors for each video.
-    for chunk_nr, samples in enumerate(chunker(tr_samples, samples_chunk)):
-        (tr_data, tr_labels, tr_counts, tr_l2_norms, tr_video_mask,
-         tr_visual_word_mask) = loader(
-             samples, outfile=outfile % ('train', chunk_nr))
-
-        tr_video_data.append(tr_video_mask * tr_data)
-        tr_video_counts.append(tr_video_mask * tr_counts)
-        tr_video_l2_norms.append(tr_video_mask * tr_l2_norms)
-        tr_video_labels += list(tr_labels)
-
-    tr_video_data = np.vstack(tr_video_data)
-    tr_video_counts = np.vstack(tr_video_counts)
-    tr_video_l2_norms = np.vstack(tr_video_l2_norms)
+    # Load all the train data at once as it's presuambly small (no slices needed).
+    (tr_video_data, tr_video_labels, tr_video_counts,
+     tr_video_l2_norms) = train_loader(outfile=tr_outfile)
 
     if verbose:
         print "Normalizing train data."
+        print "\tApproximate signed rooting."
+        print "\tEmpirical standardization:", empirical_standardization
+        print "\tL2 norm:", tr_l2_norm_type
 
     def l2_norm(type_):
         if type_ == 'true':
@@ -336,6 +456,7 @@ def evaluation(
     # L2 normalization ("true" or "approx").
     tr_video_data = tr_video_data / l2_norm(tr_l2_norm_type)
 
+    # Computing kernel.
     tr_kernel = np.dot(tr_video_data, tr_video_data.T)
 
     if verbose > 1:
@@ -354,29 +475,29 @@ def evaluation(
     true_labels = defaultdict(list)
     predictions = defaultdict(list)
 
-    for chunk_nr, samples in enumerate(chunker(te_samples, samples_chunk)):
-        # Load slice of test data.
-        (te_data, te_labels, te_counts, te_l2_norms, te_video_mask,
-         te_visual_word_mask) = loader(
-             samples, outfile=outfile % ('test', chunk_nr))
+    if verbose:
+        print "Evaluating on %d threads." % nr_threads
 
-        if src_cfg in ('hollywood2', 'dummy'):
-            te_labels = eval.lb.transform(te_labels)
+    te_samples, _ = dataset.get_data('test')
+    nr_te_samples = len(te_samples)
+    CHUNK_SIZE = 1000
 
-        if verbose > 1:
-            print "\tTest data: %dx%d." % te_data.shape
-            print "\tNumber of samples: %d." % len(te_labels)
+    for low in xrange(0, nr_te_samples, CHUNK_SIZE):
 
-        if verbose:
-            print "Evaluating on %d threads." % nr_threads
+        (fisher_vectors, te_labels, slice_vw_counts, slice_vw_l2_norms,
+         video_mask, visual_word_mask) = load_slices(
+             dataset, te_samples[low: low + CHUNK_SIZE],
+             outfile=te_outfile % low, verbose=verbose)
 
-        evaluator = threads.ParallelIter(
-            nr_threads,
-            [(ii, eval, tr_video_data, tr_std, te_data, te_labels,
-              te_visual_word_mask, te_video_mask, te_counts, te_l2_norms)
-             for ii in xrange(eval.nr_classes)], evaluate_worker)
+        eval_args = [
+            (ii, eval, tr_video_data, tr_std, fisher_vectors, slice_vw_counts,
+             slice_vw_l2_norms, video_mask, visual_word_mask, te_outfile,
+             verbose)
+            for ii in xrange(eval.nr_classes)]
+        evaluator = threads.ParallelIter(nr_threads, eval_args, evaluate_worker)
 
-        for ii, tl, pd in evaluator:
+        for ii, pd in evaluator:
+            tl = eval.lb.transform(te_labels)[:, ii]
             true_labels[ii].append(tl)
             predictions[ii].append(pd)
 
