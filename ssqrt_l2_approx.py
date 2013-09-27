@@ -79,7 +79,8 @@ LOAD_SAMPLE_DATA_PARAMS = {
 }
 
 
-def my_cacher(store_format):
+def my_cacher(*args):
+
     def loader(file, format):
         if format in ('cp', 'cPickle'):
             result = cPickle.load(file)
@@ -97,6 +98,8 @@ def my_cacher(store_format):
         else:
             assert False
 
+    store_format = args
+
     def decorator(func):
         @functools.wraps(func)
         def wrapped(*args, **kwargs):
@@ -111,10 +114,11 @@ def my_cacher(store_format):
                         dumper(ff, rr, sf)
                 return result
         return wrapped
+
     return decorator
 
 
-@my_cacher(['np', 'cp', 'np', 'np', 'cp', 'cp'])
+@my_cacher('np', 'cp', 'np', 'np', 'cp', 'cp')
 def load_dummy_data(seed, store_format=None, outfile=None):
     N_SAMPLES = 100
     N_CENTERS = 5
@@ -206,7 +210,7 @@ def approximate_video_scores(
     return sqrt_scores / np.sqrt(approx_l2_norm)
 
 
-@my_cacher(['np', 'cp', 'np', 'np', 'cp', 'cp'])
+@my_cacher('np', 'cp', 'np', 'np', 'cp', 'cp')
 def load_slices(dataset, samples, outfile=None, verbose=0):
     counts = []
     fisher_vectors = []
@@ -252,7 +256,7 @@ def load_slices(dataset, samples, outfile=None, verbose=0):
         video_mask, visual_word_mask)
 
 
-@my_cacher(['np', 'cp', 'np', 'np'])
+@my_cacher('np', 'cp', 'np', 'np')
 def load_train_video_data(dataset, outfile=None, verbose=0):
     samples, _ = dataset.get_data('train')
     nr_samples = len(samples)
@@ -299,7 +303,7 @@ def load_train_video_data(dataset, outfile=None, verbose=0):
     return data[:ii], labels[:ii], counts[:ii], l2_norms[:ii]
 
 
-@my_cacher(['np', 'np', 'np', 'cp', 'cp'])
+@my_cacher('np', 'np', 'np', 'cp', 'cp')
 def load_test_data(dataset, weight, outfile=None, verbose=0):
     samples, _ = dataset.get_data('test')
 
