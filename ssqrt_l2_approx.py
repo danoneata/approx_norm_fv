@@ -21,7 +21,8 @@ from yael import threads
 from dataset import Dataset
 from fisher_vectors.evaluation import Evaluation
 from fisher_vectors.evaluation.utils import average_precision
-from fisher_vectors.model.utils import compute_L2_normalization
+from fisher_vectors.model.utils import L2_normalize as exact_l2_normalize
+from fisher_vectors.model.utils import power_normalize
 
 from load_data import approximate_signed_sqrt
 from load_data import load_kernels
@@ -214,6 +215,15 @@ def visual_word_scores(fisher_vectors, weights, bias, visual_word_mask):
     return (- fisher_vectors * weights) * visual_word_mask  # NxK
 
 
+def approx_l2_normalize(data, l2_norms, counts):
+    zero_idxs = counts == 0
+    masked_norms = np.ma.masked_array(l2_norms, zero_idxs)
+    masked_counts = np.ma.masked_array(counts, zero_idxs)
+    masked_result = masked_norms / masked_counts
+    approx_l2_norm = np.sum(masked_result.filled(0), axis=1)
+    return data / np.sqrt(approx_l2_norm[:, np.newaxis])
+
+
 def approximate_video_scores(
     slice_scores, slice_counts, slice_l2_norms, video_mask):
 
@@ -380,8 +390,8 @@ def aggregate(data, mask=None, scale=None):
             np.sum(scale), axis=0)
     elif scale is None:
         scale = np.ones(mask.shape[1])
-        return (mask * scale[:, np.newaxis] * data /
-                mask * scale[:, np.newaxis])
+        return ((mask * (scale[:, np.newaxis] * data)) /
+                (mask * scale[:, np.newaxis]))
 
 
 def compute_average_precision(true_labels, predictions, verbose=0):
@@ -413,13 +423,29 @@ def compute_accuracy(label_binarizer, true_labels, predictions, verbose=0):
 
 def evaluate_worker((
     cls, eval, tr_data, tr_std, fisher_vectors, slice_vw_counts,
-    slice_vw_l2_norms, video_mask, visual_word_mask, outfile, verbose)):
+    slice_vw_l2_norms, video_mask, visual_word_mask, prediction_type, outfile,
+    verbose)):
 
     clf = eval.get_classifier(cls)
-    weight, bias = compute_weights(clf, tr_data, tr_std)
-    slice_vw_scores = visual_word_scores(fisher_vectors, weight, bias, visual_word_mask)
 
-    predictions = approximate_video_scores(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, video_mask)
+    if prediction_type == 'approx':
+        weight, bias = compute_weights(clf, tr_data, tr_std)
+        slice_vw_scores = visual_word_scores(fisher_vectors, weight, bias, visual_word_mask)
+        pdb.set_trace()
+        predictions = approximate_video_scores(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, video_mask)
+    elif prediction_type == 'exact':
+        # Aggregate slice data into video data.
+        video_data = aggregate(fisher_vectors, mask=video_mask)
+
+        # Apply exact normalization on the test video data.
+        video_data = power_normalize(video_data, 0.5) 
+        video_data = video_data / tr_std
+        video_data = exact_l2_normalize(video_data) 
+
+        # Apply linear classifier.
+        weight, bias = compute_weights(clf, tr_data, tr_std=None)
+        predictions = np.sum(- video_data * weight, axis=1)
+
     predictions += bias
 
     if verbose > 1:
@@ -429,8 +455,8 @@ def evaluate_worker((
 
 
 def evaluation(
-    src_cfg, tr_l2_norm_type, empirical_standardization, nr_threads=4,
-    verbose=0):
+    src_cfg, sqrt_type, empirical_standardization, l2_norm_type,
+    prediction_type, nr_threads=4, verbose=0):
 
     if verbose:
         print "Loading train data."
@@ -473,25 +499,27 @@ def evaluation(
         print "Normalizing train data."
         print "\tApproximate signed rooting."
         print "\tEmpirical standardization:", empirical_standardization
-        print "\tL2 norm:", tr_l2_norm_type
+        print "\tL2 norm:", l2_norm_type
 
-    def l2_norm(type_):
-        if type_ == 'true':
-            l2 = compute_L2_normalization(tr_video_data)
-        elif type_ == 'approx':
-            zero_idxs = tr_video_counts == 0
-            masked_norms = np.ma.masked_array(tr_video_l2_norms, zero_idxs)
-            masked_counts = np.ma.masked_array(tr_video_counts, zero_idxs)
-            masked_result = masked_norms / masked_counts
-            l2 = np.sum(masked_result.filled(0), axis=1)
+    def l2_normalize(data):
+        if l2_norm_type == 'exact':
+            return exact_l2_normalize(tr_video_data)
+        elif l2_norm_type == 'approx':
+            return approx_l2_normalize(tr_video_data, tr_video_l2_norms, tr_video_counts)
         else:
-            assert False, "Unknown L2 norm type."
-        return np.sqrt(l2[:, np.newaxis])
+            assert False
+
+    def square_root(data):
+        if sqrt_type == 'exact':
+            return power_normalize(data, 0.5)
+        elif sqrt_type == 'approx':
+            return approximate_signed_sqrt(
+                data, tr_video_counts, pi_derivatives=False, verbose=verbose)
+        else:
+            assert False
 
     # Square rooting.
-    tr_video_data = approximate_signed_sqrt(
-            tr_video_data, tr_video_counts,
-            pi_derivatives=False, verbose=verbose)
+    tr_video_data = square_root(tr_video_data)
 
     # Empirical standardization.
     if empirical_standardization:
@@ -502,7 +530,7 @@ def evaluation(
         tr_std = None
 
     # L2 normalization ("true" or "approx").
-    tr_video_data = tr_video_data / l2_norm(tr_l2_norm_type)
+    tr_video_data = l2_normalize(tr_video_data)
 
     # Computing kernel.
     tr_kernel = np.dot(tr_video_data, tr_video_data.T)
@@ -534,8 +562,8 @@ def evaluation(
 
         eval_args = [
             (ii, eval, tr_video_data, tr_std, fisher_vectors, slice_vw_counts,
-             slice_vw_l2_norms, video_mask, visual_word_mask, te_outfile,
-             verbose)
+             slice_vw_l2_norms, video_mask, visual_word_mask, prediction_type,
+             te_outfile, verbose)
             for ii in xrange(eval.nr_classes)]
         evaluator = threads.ParallelIter(nr_threads, eval_args, evaluate_worker)
 
@@ -570,10 +598,13 @@ def main():
         choices={'trecvid11_devt', 'hollywood2', 'dummy', 'hmdb_split1'},
         help="which dataset (use `dummy` for debugging purposes).")
     parser.add_argument(
+        '--exact', action='store_true', default=False,
+        help="uses exact normalizations at both train and test time.")
+    parser.add_argument(
         '-e_std', '--empirical_standardization', default=False,
         action='store_true', help="normalizes data to have unit variance.")
     parser.add_argument(
-        '--train_l2_norm', choices={'true', 'approx'}, required=True,
+        '--train_l2_norm', choices={'exact', 'approx'}, required=True,
         help="how to apply L2 normalization at train time.")
     parser.add_argument(
         '-nt', '--nr_threads', type=int, default=1, help="number of threads.")
@@ -581,9 +612,18 @@ def main():
         '-v', '--verbose', action='count', help="verbosity level.")
     args = parser.parse_args()
 
+    tr_sqrt = 'approx'
+    pred_type = 'approx'
+    tr_l2_norm = args.train_l2_norm
+
+    if args.exact:
+        tr_sqrt = 'exact'
+        tr_l2_norm = 'exact'
+        pred_type = 'exact'
+
     evaluation(
-        args.dataset, args.train_l2_norm, args.empirical_standardization,
-        nr_threads=args.nr_threads, verbose=args.verbose)
+        args.dataset, tr_sqrt, args.empirical_standardization, tr_l2_norm,
+        pred_type, nr_threads=args.nr_threads, verbose=args.verbose)
 
 
 if __name__ == '__main__':
