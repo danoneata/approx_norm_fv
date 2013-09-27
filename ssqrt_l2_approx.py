@@ -378,10 +378,10 @@ def compute_average_precision(true_labels, predictions, verbose=0):
         average_precisions.append(ap)
 
         if verbose:
-            print "%3d %5.2f" % (ii, 100 * ap)
+            print "%3d %6.2f" % (ii, 100 * ap)
 
     if verbose:
-        print '---------'
+        print '----------'
 
     print "mAP %.2f" % (100 * np.mean(average_precisions))
 
@@ -391,15 +391,10 @@ def evaluate_worker((cls, eval, tr_data, tr_std, fisher_vectors, slice_vw_counts
     weight, bias = compute_weights(eval.clf[cls], tr_data, tr_std)
     slice_vw_scores = visual_word_scores(fisher_vectors, weight, bias, visual_word_mask)
 
-    #(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms,
-    # idxs, te_labels) = load_test_data(dataset, weight, outfile=outfile, verbose=verbose)
-    #video_mask = build_aggregation_mask(idxs)
-
     predictions = approximate_video_scores(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, video_mask)
-    #true_labels = eval.lb.transform(te_labels)[:, cls]
 
     if verbose > 1:
-        print "\tClass", cls
+        print cls,
 
     return cls, predictions
 
@@ -415,15 +410,31 @@ def evaluation(
     te_outfile = ('/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_test_%d.dat')
 
     if src_cfg != 'dummy':
+
         dataset = Dataset(
             CFG[src_cfg]['dataset_name'],
             **CFG[src_cfg]['dataset_params'])
+
+        te_samples, _ = dataset.get_data('test')
+        CHUNK_SIZE = 1000
+
         def train_loader(outfile):
             return load_train_video_data(dataset, outfile=outfile, verbose=verbose)
+
+        def test_loader(samples, outfile):
+            return load_slices(dataset, samples, outfile=outfile, verbose=verbose)
+
     else: # Hack.
+
+        te_samples = [1, 3]
+        CHUNK_SIZE = 1
+
         def train_loader(outfile):
             data, labels, counts, l2_norms, _, _ = load_dummy_data(0, outfile=outfile)
             return data, labels, counts, l2_norms
+
+        def test_loader(samples, outfile):
+            return load_dummy_data(samples[0], outfile=outfile)
 
     # Load all the train data at once as it's presuambly small (no slices needed).
     (tr_video_data, tr_video_labels, tr_video_counts,
@@ -479,19 +490,14 @@ def evaluation(
     true_labels = defaultdict(list)
     predictions = defaultdict(list)
 
-    if verbose:
-        print "Evaluating on %d threads." % nr_threads
+    for ii, low in enumerate(xrange(0, len(te_samples), CHUNK_SIZE)):
 
-    te_samples, _ = dataset.get_data('test')
-    nr_te_samples = len(te_samples)
-    CHUNK_SIZE = 1000
-
-    for low in xrange(0, nr_te_samples, CHUNK_SIZE):
+        if verbose:
+            print "\tPart %3d from %5d to %5d." % (ii, low, low + CHUNK_SIZE)
+            print "\tEvaluating on %d threads." % nr_threads
 
         (fisher_vectors, te_labels, slice_vw_counts, slice_vw_l2_norms,
-         video_mask, visual_word_mask) = load_slices(
-             dataset, te_samples[low: low + CHUNK_SIZE],
-             outfile=te_outfile % low, verbose=verbose)
+         video_mask, visual_word_mask) = test_loader(te_samples, te_outfile % low)
 
         eval_args = [
             (ii, eval, tr_video_data, tr_std, fisher_vectors, slice_vw_counts,
@@ -500,10 +506,12 @@ def evaluation(
             for ii in xrange(eval.nr_classes)]
         evaluator = threads.ParallelIter(nr_threads, eval_args, evaluate_worker)
 
+        if verbose > 1: print "\t\tClasses:",
         for ii, pd in evaluator:
             tl = eval.lb.transform(te_labels)[:, ii]
             true_labels[ii].append(tl)
             predictions[ii].append(pd)
+        if verbose > 1: print 
 
     # Score results.
     compute_average_precision(true_labels, predictions, verbose=verbose)
