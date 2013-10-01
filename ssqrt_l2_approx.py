@@ -65,6 +65,18 @@ CFG = {
         },
         'metric': 'average_precision',
     },
+    'hollywood2.delta_30':{
+        'dataset_name': 'hollywood2',
+        'dataset_params': {
+            'ip_type': 'dense5.track15mbh',
+            'nr_clusters': 256,
+            'suffix': '.per_slice.delta_30',
+        },
+        'eval_name': 'hollywood2',
+        'eval_params': {
+        },
+        'metric': 'average_precision',
+    },
     'dummy': {
         'dataset_name': '',
         'dataset_params': {
@@ -599,7 +611,7 @@ def main():
 
     parser.add_argument(
         '-d', '--dataset', required=True,
-        choices={'trecvid11_devt', 'hollywood2', 'dummy', 'hmdb_split1'},
+        choices={'trecvid11_devt', 'hollywood2', 'hollywood2.delta_30', 'dummy', 'hmdb_split1'},
         help="which dataset (use `dummy` for debugging purposes).")
     parser.add_argument(
         '--exact', action='store_true', default=False,
