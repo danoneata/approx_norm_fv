@@ -229,10 +229,15 @@ def approximate_video_scores(
 
     video_scores = video_mask * slice_scores
     video_counts = video_mask * slice_counts
-    video_l2_norm = video_mask * slice_l2_norms
+    video_l2_norms = video_mask * slice_l2_norms
 
-    sqrt_scores = np.sum(video_scores / np.sqrt(video_counts), axis=1)
-    approx_l2_norm = np.sum(video_l2_norm / video_counts, axis=1)
+    zero_idxs = video_counts == 0
+    masked_scores = np.ma.masked_array(video_scores, zero_idxs)
+    masked_counts = np.ma.masked_array(video_counts, zero_idxs)
+    masked_l2_norms = np.ma.masked_array(video_l2_norms, zero_idxs)
+
+    sqrt_scores = np.sum((masked_scores / np.sqrt(masked_counts)).filled(0), axis=1)
+    approx_l2_norm = np.sum((masked_l2_norms / masked_counts).filled(0), axis=1)
 
     return sqrt_scores / np.sqrt(approx_l2_norm)
 
@@ -431,7 +436,6 @@ def evaluate_worker((
     if prediction_type == 'approx':
         weight, bias = compute_weights(clf, tr_data, tr_std)
         slice_vw_scores = visual_word_scores(fisher_vectors, weight, bias, visual_word_mask)
-        pdb.set_trace()
         predictions = approximate_video_scores(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, video_mask)
     elif prediction_type == 'exact':
         # Aggregate slice data into video data.
