@@ -37,6 +37,21 @@ from load_data import load_sample_data
 # [x] Load dummy data.
 # [x] Parallelize per-class evaluation.
 
+    
+hmdb_stab_dict = {
+    'hmdb_split%d.stab' % ii :{
+        'dataset_name': 'hmdb_split%d' % ii,
+        'dataset_params': {
+            'ip_type': 'dense5.track15mbh',
+            'nr_clusters': 256,
+            'suffix': '.per_slice.delta_15.stab.fold_%d' % ii,
+        },
+        'eval_name': 'hmdb',
+        'eval_params': {
+        },
+        'metric': 'accuracy',
+    } for ii in xrange(1, 4)}
+
 
 cache_dir = os.path.expanduser('~/scratch2/tmp')
 CFG = {
@@ -99,6 +114,7 @@ CFG = {
         'metric': 'accuracy',
     },
 }
+CFG.update(hmdb_stab_dict)
 
 
 LOAD_SAMPLE_DATA_PARAMS = {
@@ -610,8 +626,7 @@ def main():
         description="Evaluating the normalization approximations.")
 
     parser.add_argument(
-        '-d', '--dataset', required=True,
-        choices={'trecvid11_devt', 'hollywood2', 'hollywood2.delta_30', 'dummy', 'hmdb_split1'},
+        '-d', '--dataset', required=True, choices=CFG.keys(),
         help="which dataset (use `dummy` for debugging purposes).")
     parser.add_argument(
         '--exact', action='store_true', default=False,
