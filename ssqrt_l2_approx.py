@@ -224,6 +224,18 @@ def build_visual_word_mask(D, K):
     return sparse.csr_matrix(mask)
 
 
+def build_slice_agg_mask(N, n_group):
+    # Build mask.
+    yidxs = range(N)
+    xidxs = map(int, np.array(yidxs) / n_group)
+
+    M = np.int(np.ceil(float(N) / n_group)) 
+    mask = np.zeros((M, N))
+    mask[xidxs, yidxs] = 1.
+
+    return sparse.csr_matrix(mask)
+
+
 def scale_by(fisher_vectors, nr_descriptors, video_mask=None):
     if video_mask is None:
         return (
@@ -233,6 +245,27 @@ def scale_by(fisher_vectors, nr_descriptors, video_mask=None):
         return (
             fisher_vectors * nr_descriptors[:, np.newaxis]
             / ((video_mask * nr_descriptors) * video_mask)[:, np.newaxis])
+
+
+def group_data(data, nr_to_group):
+    """Sums together `nr_to_group` consecutive rows of `data`.
+
+    Parameters
+    ----------
+    data: array_like, shape (N, D)
+        Data matrix.
+
+    nr_to_group: int
+        Number of consecutive slices that are up.
+
+    Returns
+    -------
+    grouped_data: array_like, shape (M, D)
+        Grouped data.
+
+    """
+    N = data.shape[0]
+    return build_slice_agg_mask(N, nr_to_group) * data
 
 
 def visual_word_l2_norm(fisher_vectors, visual_word_mask):
@@ -271,7 +304,9 @@ def approximate_video_scores(
 
 
 @my_cacher('np', 'cp', 'np', 'np', 'cp', 'cp')
-def load_slices(dataset, samples, outfile=None, verbose=0):
+def load_slices(
+    dataset, samples, nr_slices_to_aggregate=1, outfile=None, verbose=0):
+
     counts = []
     fisher_vectors = []
     labels = []
@@ -287,17 +322,24 @@ def load_slices(dataset, samples, outfile=None, verbose=0):
         if sample.movie in names:
             continue
 
-        nn = fv.shape[0]
-        names += [sample.movie] * nn
-        labels += [ii['label']]
-        fisher_vectors.append(fv)
-        counts.append(cc)
-
         nd = info['nr_descs']
-        nr_descs.append(nd[nd != 0])
+        nd = nd[nd != 0]
+        label = ii['label']
+
+        slice_agg_mask = build_slice_agg_mask(fv.shape[0], nr_slices_to_aggregate)
+        agg_fisher_vectors = slice_agg_mask * scale_by(fv, nd, video_mask=slice_agg_mask)
+        agg_counts = slice_agg_mask * scale_by(cc, nd, video_mask=slice_agg_mask)
+
+        fisher_vectors.append(agg_fisher_vectors)
+        counts.append(agg_counts)
+        nr_descs.append(slice_agg_mask * nd)
+
+        nr_slices = fisher_vectors[-1].shape[0]
+        names += [sample.movie] * nr_slices
+        labels += [label]
 
         if verbose:
-            print '%5d %5d %s' % (jj, nn, sample.movie)
+            print '%5d %5d %s' % (jj, nr_slices, sample.movie)
 
     D, K = 64, dataset.VOC_SIZE
     fisher_vectors = np.vstack(fisher_vectors)
@@ -317,7 +359,9 @@ def load_slices(dataset, samples, outfile=None, verbose=0):
 
 
 @my_cacher('np', 'cp', 'np', 'np')
-def load_train_video_data(dataset, outfile=None, verbose=0):
+def load_train_video_data(
+    dataset, nr_slices_to_aggregate=1, outfile=None, verbose=0):
+
     samples, _ = dataset.get_data('train')
     nr_samples = len(samples)
 
@@ -344,17 +388,17 @@ def load_train_video_data(dataset, outfile=None, verbose=0):
         nr_descriptors = info['nr_descs']
         nr_descriptors = nr_descriptors[nr_descriptors != 0]
 
-        fisher_vectors = scale_by(fisher_vectors, nr_descriptors)
-        slice_counts = scale_by(slice_counts, nr_descriptors)
+        slice_agg_mask = build_slice_agg_mask(fisher_vectors.shape[0], nr_slices_to_aggregate)
+        agg_fisher_vectors = slice_agg_mask * scale_by(fisher_vectors, nr_descriptors)
 
-        data[ii] = aggregate(fisher_vectors)
-        counts[ii] = aggregate(slice_counts)
-        l2_norms[ii] = aggregate(visual_word_l2_norm(fisher_vectors, vw_mask))
+        data[ii] = aggregate(scale_by(fisher_vectors, nr_descriptors))
+        counts[ii] = aggregate(scale_by(slice_counts, nr_descriptors))
+        l2_norms[ii] = aggregate(visual_word_l2_norm(agg_fisher_vectors, vw_mask))
 
         labels.append(info['label'])
 
         if verbose:
-            print '%5d %5d %s' % (ii, len(nr_descriptors), sample.movie)
+            print '%5d %5d %s' % (ii, agg_fisher_vectors.shape[0], sample.movie)
 
         ii += 1
 
@@ -423,8 +467,8 @@ def aggregate(data, mask=None, scale=None):
             np.sum(scale), axis=0)
     elif scale is None:
         scale = np.ones(mask.shape[1])
-        return ((mask * (scale[:, np.newaxis] * data)) /
-                (mask * scale[:, np.newaxis]))
+    return ((mask * (scale[:, np.newaxis] * data)) /
+            (mask * scale[:, np.newaxis]))
 
 
 def compute_average_precision(true_labels, predictions, verbose=0):
@@ -467,11 +511,11 @@ def evaluate_worker((
         predictions = approximate_video_scores(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, video_mask)
     elif prediction_type == 'exact':
         # Aggregate slice data into video data.
-        video_data = aggregate(fisher_vectors, mask=video_mask)
+        video_data = video_mask * fisher_vectors
 
         # Apply exact normalization on the test video data.
         video_data = power_normalize(video_data, 0.5) 
-        video_data = video_data / tr_std
+        if tr_std is not None: video_data = video_data / tr_std
         video_data = exact_l2_normalize(video_data) 
 
         # Apply linear classifier.
@@ -488,13 +532,14 @@ def evaluate_worker((
 
 def evaluation(
     src_cfg, sqrt_type, empirical_standardization, l2_norm_type,
-    prediction_type, nr_threads=4, verbose=0):
+    prediction_type, nr_slices_to_aggregate=1, nr_threads=4, verbose=0):
 
     if verbose:
         print "Loading train data."
 
-    tr_outfile = ('/scratch2/clear/oneata/tmp/joblib/%s_train.dat' % src_cfg)
-    te_outfile = ('/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_test_%d.dat')
+    agg_suffix = ('_aggregated_%d' % nr_slices_to_aggregate)
+    tr_outfile = ('/scratch2/clear/oneata/tmp/joblib/%s_train%s.dat' % (src_cfg, agg_suffix))
+    te_outfile = ('/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_test_%d' + '%s.dat' % agg_suffix)
 
     if src_cfg != 'dummy':
 
@@ -506,10 +551,15 @@ def evaluation(
         CHUNK_SIZE = 1000
 
         def train_loader(outfile):
-            return load_train_video_data(dataset, outfile=outfile, verbose=verbose)
+            return load_train_video_data(
+                dataset, nr_slices_to_aggregate=nr_slices_to_aggregate,
+                outfile=outfile, verbose=verbose)
 
         def test_loader(samples, outfile):
-            return load_slices(dataset, samples, outfile=outfile, verbose=verbose)
+            return load_slices(
+                dataset, samples,
+                nr_slices_to_aggregate=nr_slices_to_aggregate, outfile=outfile,
+                verbose=verbose)
 
     else: # Hack.
 
@@ -526,10 +576,11 @@ def evaluation(
     # Load all the train data at once as it's presuambly small (no slices needed).
     (tr_video_data, tr_video_labels, tr_video_counts,
      tr_video_l2_norms) = train_loader(outfile=tr_outfile)
+    # vd, vl, vc, vl2 = load_train_video_data(None, outfile="/scratch2/clear/oneata/tmp/joblib/hmdb_split1.stab_train_aggregated_2.dat")
 
     if verbose:
         print "Normalizing train data."
-        print "\tApproximate signed rooting."
+        print "\tSigned square rooting:", sqrt_type
         print "\tEmpirical standardization:", empirical_standardization
         print "\tL2 norm:", l2_norm_type
 
@@ -590,7 +641,7 @@ def evaluation(
             print "\tEvaluating on %d threads." % nr_threads
 
         (fisher_vectors, te_labels, slice_vw_counts, slice_vw_l2_norms,
-         video_mask, visual_word_mask) = test_loader(te_samples, te_outfile % low)
+         video_mask, visual_word_mask) = test_loader(te_samples, te_outfile % ii)
 
         eval_args = [
             (ii, eval, tr_video_data, tr_std, fisher_vectors, slice_vw_counts,
@@ -640,6 +691,9 @@ def main():
     parser.add_argument(
         '-nt', '--nr_threads', type=int, default=1, help="number of threads.")
     parser.add_argument(
+        '--nr_slices_to_aggregate', type=int, default=1,
+        help="aggregates consecutive FVs.")
+    parser.add_argument(
         '-v', '--verbose', action='count', help="verbosity level.")
     args = parser.parse_args()
 
@@ -654,7 +708,8 @@ def main():
 
     evaluation(
         args.dataset, tr_sqrt, args.empirical_standardization, tr_l2_norm,
-        pred_type, nr_threads=args.nr_threads, verbose=args.verbose)
+        pred_type, nr_slices_to_aggregate=args.nr_slices_to_aggregate,
+        nr_threads=args.nr_threads, verbose=args.verbose)
 
 
 if __name__ == '__main__':
