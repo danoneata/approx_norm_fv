@@ -236,17 +236,6 @@ def build_slice_agg_mask(N, n_group):
     return sparse.csr_matrix(mask)
 
 
-def scale_by(fisher_vectors, nr_descriptors, video_mask=None):
-    if video_mask is None:
-        return (
-            fisher_vectors * nr_descriptors[:, np.newaxis]
-            / np.sum(nr_descriptors))
-    else:
-        return (
-            fisher_vectors * nr_descriptors[:, np.newaxis]
-            / ((video_mask * nr_descriptors) * video_mask)[:, np.newaxis])
-
-
 def group_data(data, nr_to_group):
     """Sums together `nr_to_group` consecutive rows of `data`.
 
@@ -303,6 +292,41 @@ def approximate_video_scores(
     return sqrt_scores / np.sqrt(approx_l2_norm)
 
 
+def sum_by(data, mask=None):
+    """Sums together rows of `data` according to the sparse matrix `mask`. If
+    `mask` is None, then sums all the rows.
+    
+    """
+    if mask is None:
+        return np.sum(data, axis=0)
+    return mask * data
+
+
+def expand_by(data, mask=None):
+    if mask is None:
+        return data
+    return mask.T * data
+
+
+def scale_by(data, coef, mask=None):
+    """Multiplies each row of `data` by a normalized version of `coef`; the
+    normalization is specified by `mask`. If `mask` is None, the normalization
+    term is the sum of all elements in `coef`.
+
+    """
+    coef_ = coef[:, np.newaxis]
+    return data * coef_ / expand_by(sum_by(coef_, mask), mask)
+
+
+def scale_and_sum_by(data, coef, data_mask=None, coef_mask=None):
+    """Combines two of the previous functions: first scales the rows of `data`
+    by `coef` given the mask `coef_mask`; then aggreagtes the scaled rows of
+    `data` by a possibly different mask `data_mask`.
+
+    """
+    return sum_by(scale_by(data, coef, coef_mask), data_mask)
+
+
 @my_cacher('np', 'cp', 'np', 'np', 'cp', 'cp')
 def load_slices(
     dataset, samples, nr_slices_to_aggregate=1, outfile=None, verbose=0):
@@ -327,12 +351,13 @@ def load_slices(
         label = ii['label']
 
         slice_agg_mask = build_slice_agg_mask(fv.shape[0], nr_slices_to_aggregate)
-        agg_fisher_vectors = slice_agg_mask * scale_by(fv, nd, video_mask=slice_agg_mask)
-        agg_counts = slice_agg_mask * scale_by(cc, nd, video_mask=slice_agg_mask)
+
+        agg_fisher_vectors = scale_and_sum_by(fv, nd, data_mask=slice_agg_mask, coef_mask=slice_agg_mask)
+        agg_counts = scale_and_sum_by(cc, nd, data_mask=slice_agg_mask, coef_mask=slice_agg_mask)
 
         fisher_vectors.append(agg_fisher_vectors)
         counts.append(agg_counts)
-        nr_descs.append(slice_agg_mask * nd)
+        nr_descs.append(sum_by(nd, slice_agg_mask))
 
         nr_slices = fisher_vectors[-1].shape[0]
         names += [sample.movie] * nr_slices
@@ -349,8 +374,8 @@ def load_slices(
     video_mask = build_aggregation_mask(names)
     visual_word_mask = build_visual_word_mask(D, K)
 
-    fisher_vectors = scale_by(fisher_vectors, nr_descs, video_mask)
-    slice_vw_counts = scale_by(counts, nr_descs, video_mask)
+    fisher_vectors = scale_by(fisher_vectors, nr_descs, mask=video_mask)
+    slice_vw_counts = scale_by(counts, nr_descs, mask=video_mask)
     slice_vw_l2_norms = visual_word_l2_norm(fisher_vectors, visual_word_mask)
 
     return (
@@ -389,11 +414,11 @@ def load_train_video_data(
         nr_descriptors = nr_descriptors[nr_descriptors != 0]
 
         slice_agg_mask = build_slice_agg_mask(fisher_vectors.shape[0], nr_slices_to_aggregate)
-        agg_fisher_vectors = slice_agg_mask * scale_by(fisher_vectors, nr_descriptors)
+        agg_fisher_vectors = scale_and_sum_by(fisher_vectors, nr_descriptors, data_mask=slice_agg_mask)
 
-        data[ii] = aggregate(scale_by(fisher_vectors, nr_descriptors))
-        counts[ii] = aggregate(scale_by(slice_counts, nr_descriptors))
-        l2_norms[ii] = aggregate(visual_word_l2_norm(agg_fisher_vectors, vw_mask))
+        data[ii] = scale_and_sum_by(fisher_vectors, nr_descriptors)
+        counts[ii] = scale_and_sum_by(slice_counts, nr_descriptors)
+        l2_norms[ii] = sum_by(visual_word_l2_norm(agg_fisher_vectors, vw_mask))
 
         labels.append(info['label'])
 
@@ -455,20 +480,6 @@ def load_test_data(dataset, weight, outfile=None, verbose=0):
     slice_vw_l2_norms = np.vstack(slice_vw_l2_norms)
 
     return slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, idxs, labels
-
-
-def aggregate(data, mask=None, scale=None):
-    """ Aggregates per-slice data into per-video data. """
-    if mask is None and scale is None:
-        return np.sum(data, axis=0)
-    elif mask is None:
-        return np.sum(
-            scale[:, np.newaxis] * data /
-            np.sum(scale), axis=0)
-    elif scale is None:
-        scale = np.ones(mask.shape[1])
-    return ((mask * (scale[:, np.newaxis] * data)) /
-            (mask * scale[:, np.newaxis]))
 
 
 def compute_average_precision(true_labels, predictions, verbose=0):
