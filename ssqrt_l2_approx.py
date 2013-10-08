@@ -432,56 +432,6 @@ def load_train_video_data(
     return data[:ii], labels[:ii], counts[:ii], l2_norms[:ii]
 
 
-@my_cacher('np', 'np', 'np', 'cp', 'cp')
-def load_test_data(dataset, weight, outfile=None, verbose=0):
-    samples, _ = dataset.get_data('test')
-
-    D, K = 64, dataset.VOC_SIZE
-    visual_word_mask = build_visual_word_mask(D, K)
-
-    slice_vw_scores = []
-    slice_vw_counts = []
-    slice_vw_l2_norms = []
-    labels = []
-    idxs = []
-
-    ii = 0
-    seen_samples = []
-
-    for sample in samples:
-
-        if sample.movie in seen_samples:
-            continue
-        seen_samples.append(sample.movie)
-
-        fisher_vectors, _, slice_counts, info = load_sample_data(
-            dataset, sample, **LOAD_SAMPLE_DATA_PARAMS)
-        nr_descriptors = info['nr_descs']
-        nr_descriptors = nr_descriptors[nr_descriptors != 0]
-        nn = len(nr_descriptors)
-
-        fisher_vectors = scale_by(fisher_vectors, nr_descriptors)
-        slice_counts = scale_by(slice_counts, nr_descriptors)
-
-        slice_vw_scores.append(visual_word_scores(fisher_vectors, weight, 0, visual_word_mask))
-        slice_vw_counts.append(slice_counts)
-        slice_vw_l2_norms.append(visual_word_l2_norm(fisher_vectors, visual_word_mask))
-
-        labels.append(info['label'])
-        idxs += [ii] * nn
-
-        if verbose > 2:
-            print '%5d %5d %s' % (ii, nn, sample.movie)
-
-        ii += 1
-
-    slice_vw_scores = np.vstack(slice_vw_scores)
-    slice_vw_counts = np.vstack(slice_vw_counts)
-    slice_vw_l2_norms = np.vstack(slice_vw_l2_norms)
-
-    return slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, idxs, labels
-
-
 def compute_average_precision(true_labels, predictions, verbose=0):
     average_precisions = []
     for ii in sorted(true_labels.keys()):
