@@ -329,7 +329,8 @@ def scale_and_sum_by(data, coef, data_mask=None, coef_mask=None):
 
 @my_cacher('np', 'cp', 'np', 'np', 'cp', 'cp')
 def load_slices(
-    dataset, samples, nr_slices_to_aggregate=1, outfile=None, verbose=0):
+    dataset, samples, nr_slices_to_aggregate=1, outfile=None, verbose=0,
+    std_scaler=None):
 
     counts = []
     fisher_vectors = []
@@ -345,6 +346,9 @@ def load_slices(
 
         if sample.movie in names:
             continue
+
+        if std_scaler is not None:
+            fv = std_scaler.transform(fv)
 
         nd = info['nr_descs']
         nd = nd[nd != 0]
@@ -385,7 +389,7 @@ def load_slices(
 
 @my_cacher('np', 'cp', 'np', 'np')
 def load_train_video_data(
-    dataset, nr_slices_to_aggregate=1, outfile=None, verbose=0):
+    dataset, nr_slices_to_aggregate=1, outfile=None, verbose=0, std_scaler=None):
 
     samples, _ = dataset.get_data('train')
     nr_samples = len(samples)
@@ -412,6 +416,9 @@ def load_train_video_data(
             dataset, sample, **LOAD_SAMPLE_DATA_PARAMS)
         nr_descriptors = info['nr_descs']
         nr_descriptors = nr_descriptors[nr_descriptors != 0]
+
+        if std_scaler is not None:
+            fisher_vectors = std_scaler.transform(fisher_vectors)
 
         slice_agg_mask = build_slice_agg_mask(fisher_vectors.shape[0], nr_slices_to_aggregate)
         agg_fisher_vectors = scale_and_sum_by(fisher_vectors, nr_descriptors, data_mask=slice_agg_mask)
@@ -467,7 +474,7 @@ def evaluate_worker((
     clf = eval.get_classifier(cls)
 
     if prediction_type == 'approx':
-        weight, bias = compute_weights(clf, tr_data, tr_std)
+        weight, bias = compute_weights(clf, tr_data, tr_std=None)
         slice_vw_scores = visual_word_scores(fisher_vectors, weight, bias, visual_word_mask)
         predictions = approximate_video_scores(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, video_mask)
     elif prediction_type == 'exact':
@@ -537,7 +544,6 @@ def evaluation(
     # Load all the train data at once as it's presuambly small (no slices needed).
     (tr_video_data, tr_video_labels, tr_video_counts,
      tr_video_l2_norms) = train_loader(outfile=tr_outfile)
-    # vd, vl, vc, vl2 = load_train_video_data(None, outfile="/scratch2/clear/oneata/tmp/joblib/hmdb_split1.stab_train_aggregated_2.dat")
 
     if verbose:
         print "Normalizing train data."
@@ -570,6 +576,10 @@ def evaluation(
         scaler = StandardScaler(with_mean=False)
         tr_video_data = scaler.fit_transform(tr_video_data)
         tr_std = scaler.std_
+        tr_std_outfile = tr_outfile + '.std'
+        (_, _, _, tr_video_l2_norms) = load_train_video_data(
+             dataset, nr_slices_to_aggregate=nr_slices_to_aggregate,
+             outfile=tr_std_outfile, verbose=verbose, std_scaler=scaler)
     else:
         tr_std = None
 
@@ -602,7 +612,11 @@ def evaluation(
             print "\tEvaluating on %d threads." % nr_threads
 
         (fisher_vectors, te_labels, slice_vw_counts, slice_vw_l2_norms,
-         video_mask, visual_word_mask) = test_loader(te_samples, te_outfile % ii)
+         video_mask, visual_word_mask) = load_slices(
+             dataset, te_samples, std_scaler=scaler,
+             nr_slices_to_aggregate=nr_slices_to_aggregate, outfile=te_outfile,
+             verbose=verbose)
+
 
         eval_args = [
             (ii, eval, tr_video_data, tr_std, fisher_vectors, slice_vw_counts,
