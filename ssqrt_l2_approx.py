@@ -425,9 +425,9 @@ def load_train_video_data(
 
     for sample in samples:
 
-        if sample.movie in seen_samples:
+        if str(sample) in seen_samples:
             continue
-        seen_samples.append(sample.movie)
+        seen_samples.append(str(sample))
 
         fisher_vectors, _, slice_counts, info = load_sample_data(
             dataset, sample, **LOAD_SAMPLE_DATA_PARAMS)
