@@ -357,9 +357,7 @@ def load_slices(
 
     for jj, sample in enumerate(samples):
 
-        fv, ii, cc, info = load_sample_data(
-            dataset, sample, analytical_fim=True, pi_derivatives=False,
-            sqrt_nr_descs=False, return_info=True)
+        fv, ii, cc, info = load_sample_data(dataset, sample, **LOAD_SAMPLE_DATA_PARAMS)
 
         if sample.movie in names:
             continue
@@ -406,7 +404,8 @@ def load_slices(
 
 @my_cacher('np', 'cp', 'np', 'np')
 def load_train_video_data(
-    dataset, nr_slices_to_aggregate=1, outfile=None, verbose=0, std_scaler=None):
+    dataset, nr_slices_to_aggregate=1, outfile=None, verbose=0,
+    std_scaler=None):
 
     samples, _ = dataset.get_data('train')
     nr_samples = len(samples)
@@ -484,11 +483,12 @@ def compute_accuracy(label_binarizer, true_labels, predictions, verbose=0):
 
 
 def evaluate_worker((
-    cls, eval, tr_data, tr_std, fisher_vectors, slice_vw_counts,
+    cls, eval, tr_data, tr_scaler, fisher_vectors, slice_vw_counts,
     slice_vw_l2_norms, video_mask, visual_word_mask, prediction_type, outfile,
     verbose)):
 
     clf = eval.get_classifier(cls)
+    tr_std = tr_scaler.std_ if tr_scaler is not None else None
 
     if prediction_type == 'approx':
         weight, bias = compute_weights(clf, tr_data, tr_std=None)
@@ -515,52 +515,15 @@ def evaluate_worker((
     return cls, predictions
 
 
-def evaluation(
-    src_cfg, sqrt_type, empirical_standardization, l2_norm_type,
-    prediction_type, nr_slices_to_aggregate=1, nr_threads=4, verbose=0):
-
-    if verbose:
-        print "Loading train data."
-
-    agg_suffix = ('_aggregated_%d' % nr_slices_to_aggregate)
-    tr_outfile = ('/scratch2/clear/oneata/tmp/joblib/%s_train%s.dat' % (src_cfg, agg_suffix))
-    te_outfile = ('/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_test_%d' + '%s.dat' % agg_suffix)
-
-    if src_cfg != 'dummy':
-
-        dataset = Dataset(
-            CFG[src_cfg]['dataset_name'],
-            **CFG[src_cfg]['dataset_params'])
-
-        te_samples, _ = dataset.get_data('test')
-        CHUNK_SIZE = 1000
-
-        def train_loader(outfile):
-            return load_train_video_data(
-                dataset, nr_slices_to_aggregate=nr_slices_to_aggregate,
-                outfile=outfile, verbose=verbose)
-
-        def test_loader(samples, outfile):
-            return load_slices(
-                dataset, samples,
-                nr_slices_to_aggregate=nr_slices_to_aggregate, outfile=outfile,
-                verbose=verbose)
-
-    else: # Hack.
-
-        te_samples = [1, 3]
-        CHUNK_SIZE = 1
-
-        def train_loader(outfile):
-            data, labels, counts, l2_norms, _, _ = load_dummy_data(0, outfile=outfile)
-            return data, labels, counts, l2_norms
-
-        def test_loader(samples, outfile):
-            return load_dummy_data(samples[0], outfile=outfile)
+def load_normalized_tr_data(
+    dataset, nr_slices_to_aggregate, l2_norm_type, empirical_standardization,
+    sqrt_type, tr_outfile, verbose):
 
     # Load all the train data at once as it's presuambly small (no slices needed).
     (tr_video_data, tr_video_labels, tr_video_counts,
-     tr_video_l2_norms) = train_loader(outfile=tr_outfile)
+     tr_video_l2_norms) = load_train_video_data(
+         dataset, nr_slices_to_aggregate=nr_slices_to_aggregate,
+         outfile=(tr_outfile % ''), verbose=verbose)
 
     if verbose:
         print "Normalizing train data."
@@ -570,9 +533,15 @@ def evaluation(
 
     def l2_normalize(data):
         if l2_norm_type == 'exact':
-            return exact_l2_normalize(tr_video_data)
+            return exact_l2_normalize(data)
         elif l2_norm_type == 'approx':
-            return approx_l2_normalize(tr_video_data, tr_video_l2_norms, tr_video_counts)
+            if sqrt_type == 'none':
+                counts = np.ones(tr_video_counts.shape)
+            else:
+                counts = tr_video_counts
+            return approx_l2_normalize(data, tr_video_l2_norms, counts)
+        elif l2_norm_type == 'none':
+            return data
         else:
             assert False
 
@@ -582,6 +551,8 @@ def evaluation(
         elif sqrt_type == 'approx':
             return approximate_signed_sqrt(
                 data, tr_video_counts, pi_derivatives=False, verbose=verbose)
+        elif sqrt_type == 'none':
+            return data
         else:
             assert False
 
@@ -592,16 +563,37 @@ def evaluation(
     if empirical_standardization:
         scaler = StandardScaler(with_mean=False)
         tr_video_data = scaler.fit_transform(tr_video_data)
-        tr_std = scaler.std_
-        tr_std_outfile = tr_outfile + '.std'
+
+        suffix = '_%s_%s' % ('std', sqrt_type)
+        tr_std_outfile = tr_outfile % suffix
         (_, _, _, tr_video_l2_norms) = load_train_video_data(
              dataset, nr_slices_to_aggregate=nr_slices_to_aggregate,
              outfile=tr_std_outfile, verbose=verbose, std_scaler=scaler)
     else:
-        tr_std = None
+        scaler = None
 
     # L2 normalization ("true" or "approx").
     tr_video_data = l2_normalize(tr_video_data)
+
+    return tr_video_data, tr_video_labels, scaler
+
+
+def evaluation(
+    src_cfg, sqrt_type, empirical_standardization, l2_norm_type,
+    prediction_type, nr_slices_to_aggregate=1, nr_threads=4, verbose=0):
+
+    dataset = Dataset(CFG[src_cfg]['dataset_name'], **CFG[src_cfg]['dataset_params'])
+
+    if verbose:
+        print "Loading train data."
+
+    generic_tr_outfile = '/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_train%s%s.dat'
+    agg_suffix = '_aggregated_%d' % nr_slices_to_aggregate
+    tr_outfile = generic_tr_outfile % (agg_suffix, '%s')
+
+    tr_video_data, tr_video_labels, tr_scaler = load_normalized_tr_data(
+        dataset, nr_slices_to_aggregate, l2_norm_type,
+        empirical_standardization, sqrt_type, tr_outfile, verbose)
 
     # Computing kernel.
     tr_kernel = np.dot(tr_video_data, tr_video_data.T)
@@ -619,6 +611,10 @@ def evaluation(
     if verbose:
         print "Loading test data."
 
+    te_outfile = ('/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_test_%d' + '%s.dat' % agg_suffix)
+    te_samples, _ = dataset.get_data('test')
+    CHUNK_SIZE = 1000
+
     true_labels = defaultdict(list)
     predictions = defaultdict(list)
 
@@ -630,15 +626,14 @@ def evaluation(
 
         (fisher_vectors, te_labels, slice_vw_counts, slice_vw_l2_norms,
          video_mask, visual_word_mask) = load_slices(
-             dataset, te_samples, std_scaler=scaler,
-             nr_slices_to_aggregate=nr_slices_to_aggregate, outfile=te_outfile,
-             verbose=verbose)
-
+             dataset, te_samples, std_scaler=tr_scaler,
+             nr_slices_to_aggregate=nr_slices_to_aggregate,
+             outfile=(te_outfile % ii), verbose=verbose)
 
         eval_args = [
-            (ii, eval, tr_video_data, tr_std, fisher_vectors, slice_vw_counts,
-             slice_vw_l2_norms, video_mask, visual_word_mask, prediction_type,
-             te_outfile, verbose)
+            (ii, eval, tr_video_data, tr_scaler, fisher_vectors,
+             slice_vw_counts, slice_vw_l2_norms, video_mask, visual_word_mask,
+             prediction_type, te_outfile, verbose)
             for ii in xrange(eval.nr_classes)]
         evaluator = threads.ParallelIter(nr_threads, eval_args, evaluate_worker)
 
