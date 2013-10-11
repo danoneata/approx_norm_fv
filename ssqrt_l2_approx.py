@@ -113,6 +113,18 @@ CFG = {
         },
         'metric': 'accuracy',
     },
+    'cc':{
+        'dataset_name': 'cc',
+        'dataset_params': {
+            'ip_type': 'dense5.track15mbh',
+            'nr_clusters': 128,
+            'suffix': '',
+        },
+        'eval_name': 'cc',
+        'eval_params': {
+        },
+        'metric': 'average_precision',
+    },
 }
 CFG.update(hmdb_stab_dict)
 
