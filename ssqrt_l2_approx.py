@@ -339,6 +339,11 @@ def scale_and_sum_by(data, coef, data_mask=None, coef_mask=None):
     return sum_by(scale_by(data, coef, coef_mask), data_mask)
 
 
+def sum_and_scale_by(data, coef, mask=None):
+    coef_ = coef[:, np.newaxis]
+    return sum_by(data * coef_, mask=mask) / sum_by(coef_, mask=mask)
+
+
 @my_cacher('np', 'cp', 'np', 'np', 'cp', 'cp')
 def load_slices(
     dataset, samples, nr_slices_to_aggregate=1, outfile=None, verbose=0,
