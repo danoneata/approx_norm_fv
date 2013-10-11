@@ -138,7 +138,17 @@ def build_sliding_window_mask(N, nn):
 
 def build_integral_sliding_window_mask(N, nn):
     """Builds mask for efficient integral sliding window."""
-    pass
+    H, W = N - nn + 1, N + 1
+    mask = np.zeros((H, W))
+
+    row_idxs = range(H)
+    neg_idxs = range(H)
+    pos_idxs = [nn + i for i in range(H)]
+
+    mask[row_idxs, neg_idxs] = -1
+    mask[row_idxs, pos_idxs] = +1
+
+    return sparse.csr_matrix(mask)
 
 
 def aggregate(slice_data, nn):
@@ -204,7 +214,14 @@ def exact_sliding_window(slice_data, clf, scaler, deltas):
 
 
 @timer
-def approx_sliding_window(slice_data, clf, scaler, deltas, visual_word_mask):
+def approx_sliding_window(
+    slice_data, clf, scaler, deltas, visual_word_mask,
+    use_integral_values=True):
+
+    def integral(X):
+        return np.vstack((
+            np.zeros((1, X.shape[1])),
+            np.cumsum(X, axis=0)))
 
     results = [] 
     weights, bias = clf
@@ -213,9 +230,18 @@ def approx_sliding_window(slice_data, clf, scaler, deltas, visual_word_mask):
     fisher_vectors = scaler.transform(slice_data.fisher_vectors)
     fisher_vectors = scale_by(slice_data.fisher_vectors, slice_data.nr_descriptors)
     #slice_vw_counts = slice_data.counts
+
     slice_vw_counts = scale_by(slice_data.counts, slice_data.nr_descriptors)
     slice_vw_l2_norms = visual_word_l2_norm(fisher_vectors, visual_word_mask)
     slice_vw_scores = visual_word_scores(fisher_vectors, weights, bias, visual_word_mask)
+
+    if use_integral_values:
+        slice_vw_counts = integral(slice_vw_counts)
+        slice_vw_l2_norms = integral(slice_vw_l2_norms)
+        slice_vw_scores = integral(slice_vw_scores)
+        build_mask = build_integral_sliding_window_mask
+    else:
+        build_mask = build_sliding_window_mask
 
     N = fisher_vectors.shape[0]
 
@@ -223,7 +249,7 @@ def approx_sliding_window(slice_data, clf, scaler, deltas, visual_word_mask):
 
         # Build mask.
         nn = delta / DELTA_0
-        mask = build_sliding_window_mask(N, nn)
+        mask = build_mask(N, nn)
 
         # Approximated predictions.
         scores = approximate_video_scores(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, mask)
