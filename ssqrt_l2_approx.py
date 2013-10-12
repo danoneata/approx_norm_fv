@@ -630,6 +630,9 @@ def evaluation(
              nr_slices_to_aggregate=nr_slices_to_aggregate,
              outfile=(te_outfile % ii), verbose=verbose)
 
+        if verbose:
+            print "\tTest data: %dx%d." % fisher_vectors.shape
+
         eval_args = [
             (ii, eval, tr_video_data, tr_scaler, fisher_vectors,
              slice_vw_counts, slice_vw_l2_norms, video_mask, visual_word_mask,
