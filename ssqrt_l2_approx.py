@@ -1,6 +1,7 @@
 """ Uses approximations for both signed square rooting and l2 normalization."""
 import argparse
 from collections import defaultdict
+from collections import namedtuple
 import cPickle
 import functools
 from multiprocessing import Pool
@@ -30,12 +31,18 @@ from load_data import load_sample_data
 
 
 # TODO Possible improvements:
-# [ ] Evaluate with the exact normalizations.
+# [ ] Share the `SliceData` data structure with the `detection.py` module. 
+# [ ] Isolate the dataset configuration into another module and the loading functions.
+# [ ] Isolate the utils.
 # [ ] Pre-allocate test data (counts, L2 norms and scores).
+# [x] Evaluate with the exact normalizations.
 # [x] Use sparse matrices for masks.
 # [x] Use also empirical standardization.
 # [x] Load dummy data.
 # [x] Parallelize per-class evaluation.
+
+
+SliceData = namedtuple('SliceData', ['fisher_vectors', 'counts', 'nr_descriptors'])
 
     
 hmdb_stab_dict = {
@@ -187,7 +194,7 @@ def load_dummy_data(seed, store_format=None, outfile=None):
         n_samples=N_SAMPLES, centers=N_CENTERS,
         n_features=N_FEATURES, random_state=seed)
 
-    te_video_mask = sparse.csr_matrix(np.eye(N_SAMPLES))
+    te_slice_data.video_mask = sparse.csr_matrix(np.eye(N_SAMPLES))
     te_visual_word_mask = build_visual_word_mask(D, K)
 
     np.random.seed(seed)
@@ -344,16 +351,15 @@ def sum_and_scale_by(data, coef, mask=None):
     return sum_by(data * coef_, mask=mask) / sum_by(coef_, mask=mask)
 
 
-@my_cacher('np', 'cp', 'np', 'np', 'cp', 'cp')
-def load_slices(
-    dataset, samples, nr_slices_to_aggregate=1, outfile=None, verbose=0,
-    std_scaler=None):
+@my_cacher('np', 'np', 'np', 'np', 'cp', 'cp')
+def load_slices(dataset, samples, outfile=None, verbose=0):
 
     counts = []
     fisher_vectors = []
     labels = []
     names = []
     nr_descs = []
+    nr_slices = []
 
     for jj, sample in enumerate(samples):
 
@@ -362,44 +368,55 @@ def load_slices(
         if sample.movie in names:
             continue
 
-        if std_scaler is not None:
-            fv = std_scaler.transform(fv)
-
         nd = info['nr_descs']
         nd = nd[nd != 0]
         label = ii['label']
 
-        slice_agg_mask = build_slice_agg_mask(fv.shape[0], nr_slices_to_aggregate)
+        #slice_agg_mask = build_slice_agg_mask(fv.shape[0], nr_slices_to_aggregate)
 
-        agg_fisher_vectors = scale_and_sum_by(fv, nd, data_mask=slice_agg_mask, coef_mask=slice_agg_mask)
-        agg_counts = scale_and_sum_by(cc, nd, data_mask=slice_agg_mask, coef_mask=slice_agg_mask)
+        #agg_fisher_vectors = scale_and_sum_by(fv, nd, data_mask=slice_agg_mask, coef_mask=slice_agg_mask)
+        #agg_counts = scale_and_sum_by(cc, nd, data_mask=slice_agg_mask, coef_mask=slice_agg_mask)
 
-        fisher_vectors.append(agg_fisher_vectors)
-        counts.append(agg_counts)
-        nr_descs.append(sum_by(nd, slice_agg_mask))
+        fisher_vectors.append(fv)
+        counts.append(cc)
+        nr_descs.append(nd)
 
-        nr_slices = fisher_vectors[-1].shape[0]
-        names += [sample.movie] * nr_slices
+        nr_slices.append(fisher_vectors[-1].shape[0])
+        names.append(sample.movie)
         labels += [label]
 
         if verbose:
-            print '%5d %5d %s' % (jj, nr_slices, sample.movie)
+            print '%5d %5d %s' % (jj, nr_slices[-1], sample.movie)
 
-    D, K = 64, dataset.VOC_SIZE
     fisher_vectors = np.vstack(fisher_vectors)
     counts = np.vstack(counts)
     nr_descs = np.hstack(nr_descs)
+    nr_slices = np.array(nr_slices)
 
-    video_mask = build_aggregation_mask(names)
-    visual_word_mask = build_visual_word_mask(D, K)
+    return fisher_vectors, counts, nr_descs, nr_slices, names, labels
 
-    fisher_vectors = scale_by(fisher_vectors, nr_descs, mask=video_mask)
-    slice_vw_counts = scale_by(counts, nr_descs, mask=video_mask)
-    slice_vw_l2_norms = visual_word_l2_norm(fisher_vectors, visual_word_mask)
 
-    return (
-        fisher_vectors, labels, slice_vw_counts, slice_vw_l2_norms,
-        video_mask, visual_word_mask)
+def slice_aggregator(slice_data, nr_slices, nr_agg):
+
+    # Generate idxs.
+    idxs = []
+    ii = 0
+    for dd in nr_slices:
+        idxs += [j / nr_agg for j in range(ii, ii + dd)]
+        ii = int(np.ceil((ii + dd) / float(nr_agg))) * nr_agg
+
+    assert len(idxs) == nr_slices.sum()
+    mask = build_aggregation_mask(idxs)
+
+    agg_fisher_vectors = scale_and_sum_by(
+        slice_data.fisher_vectors, slice_data.nr_descriptors,
+        data_mask=mask, coef_mask=mask)
+    agg_counts = scale_and_sum_by(
+        slice_data.counts, slice_data.nr_descriptors,
+        data_mask=mask, coef_mask=mask)
+    agg_nr_descs = sum_by(slice_data.nr_descriptors, mask)
+
+    return SliceData(agg_fisher_vectors, agg_counts, agg_nr_descs)
 
 
 @my_cacher('np', 'cp', 'np', 'np')
@@ -483,28 +500,32 @@ def compute_accuracy(label_binarizer, true_labels, predictions, verbose=0):
 
 
 def evaluate_worker((
-    cls, eval, tr_data, tr_scaler, fisher_vectors, slice_vw_counts,
-    slice_vw_l2_norms, video_mask, visual_word_mask, prediction_type, outfile,
-    verbose)):
+    cls, eval, tr_data, tr_scaler, slice_data, video_mask, visual_word_mask,
+    prediction_type, verbose)):
 
     clf = eval.get_classifier(cls)
-    tr_std = tr_scaler.std_ if tr_scaler is not None else None
+    weight, bias = compute_weights(clf, tr_data, tr_std=None)
 
     if prediction_type == 'approx':
-        weight, bias = compute_weights(clf, tr_data, tr_std=None)
-        slice_vw_scores = visual_word_scores(fisher_vectors, weight, bias, visual_word_mask)
+        slice_vw_counts = scale_by(slice_data.counts, slice_data.nr_descriptors, mask=video_mask)
+        slice_vw_l2_norms = visual_word_l2_norm(slice_data.fisher_vectors, visual_word_mask)
+        slice_vw_scores = visual_word_scores(slice_data.fisher_vectors, weight, bias, visual_word_mask)
         predictions = approximate_video_scores(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, video_mask)
     elif prediction_type == 'exact':
         # Aggregate slice data into video data.
-        video_data = video_mask * fisher_vectors
+        video_data = scale_and_sum_by(
+            slice_data.fisher_vectors,
+            slice_data.nr_descriptors,
+            data_mask=video_mask,
+            coef_mask=video_mask)
 
         # Apply exact normalization on the test video data.
         video_data = power_normalize(video_data, 0.5) 
-        if tr_std is not None: video_data = video_data / tr_std
+        if tr_scaler is not None:
+            video_data = tr_scaler.transform(video_data)
         video_data = exact_l2_normalize(video_data) 
 
         # Apply linear classifier.
-        weight, bias = compute_weights(clf, tr_data, tr_std=None)
         predictions = np.sum(- video_data * weight, axis=1)
 
     predictions += bias
@@ -563,12 +584,14 @@ def load_normalized_tr_data(
     if empirical_standardization:
         scaler = StandardScaler(with_mean=False)
         tr_video_data = scaler.fit_transform(tr_video_data)
-
-        suffix = '_%s_%s' % ('std', sqrt_type)
-        tr_std_outfile = tr_outfile % suffix
-        (_, _, _, tr_video_l2_norms) = load_train_video_data(
-             dataset, nr_slices_to_aggregate=nr_slices_to_aggregate,
-             outfile=tr_std_outfile, verbose=verbose, std_scaler=scaler)
+        
+        if nr_slices_to_aggregate > 1:
+            # Second pass through the data to correct the L2 norms.
+            suffix = '_%s_%s' % ('std', sqrt_type)
+            tr_std_outfile = tr_outfile % suffix
+            (_, _, _, tr_video_l2_norms) = load_train_video_data(
+                 dataset, nr_slices_to_aggregate=nr_slices_to_aggregate,
+                 outfile=tr_std_outfile, verbose=verbose, std_scaler=scaler)
     else:
         scaler = None
 
@@ -583,6 +606,7 @@ def evaluation(
     prediction_type, nr_slices_to_aggregate=1, nr_threads=4, verbose=0):
 
     dataset = Dataset(CFG[src_cfg]['dataset_name'], **CFG[src_cfg]['dataset_params'])
+    D, K = 64, dataset.VOC_SIZE
 
     if verbose:
         print "Loading train data."
@@ -611,10 +635,10 @@ def evaluation(
     if verbose:
         print "Loading test data."
 
-    std_suffix = '_std' if empirical_standardization else ''
-    te_outfile = ('/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_test_%d' + '%s%s.dat' % (agg_suffix, std_suffix))
+    te_outfile = ('/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_test_%d.dat')
     te_samples, _ = dataset.get_data('test')
     CHUNK_SIZE = 1000
+    visual_word_mask = build_visual_word_mask(D, K)
 
     true_labels = defaultdict(list)
     predictions = defaultdict(list)
@@ -625,19 +649,33 @@ def evaluation(
             print "\tPart %3d from %5d to %5d." % (ii, low, low + CHUNK_SIZE)
             print "\tEvaluating on %d threads." % nr_threads
 
-        (fisher_vectors, te_labels, slice_vw_counts, slice_vw_l2_norms,
-         video_mask, visual_word_mask) = load_slices(
-             dataset, te_samples, std_scaler=tr_scaler,
-             nr_slices_to_aggregate=nr_slices_to_aggregate,
-             outfile=(te_outfile % ii), verbose=verbose)
+        fisher_vectors, counts, nr_descs, nr_slices, _, te_labels = load_slices(
+            dataset, te_samples, outfile=(te_outfile % ii), verbose=verbose)
+        slice_data = SliceData(fisher_vectors, counts, nr_descs)
+        agg_slice_data = slice_aggregator(slice_data, nr_slices, nr_slices_to_aggregate)
+
+        video_mask = build_aggregation_mask(
+            sum([[ii] * int(np.ceil(float(nn) / nr_slices_to_aggregate))
+                 for ii, nn in enumerate(nr_slices)],
+                []))
 
         if verbose:
-            print "\tTest data: %dx%d." % fisher_vectors.shape
+            print "\tTest data: %dx%d." % agg_slice_data.fisher_vectors.shape
+
+        # Scale the FVs in the main program, to avoid blowing up the memory.
+        if prediction_type == 'approx':
+            if tr_scaler is not None:
+                agg_slice_data = agg_slice_data._replace(
+                    fisher_vectors=tr_scaler.transform(agg_slice_data.fisher_vectors))
+            agg_slice_data = agg_slice_data._replace(
+                fisher_vectors=scale_by(
+                    agg_slice_data.fisher_vectors,
+                    agg_slice_data.nr_descriptors,
+                    mask=video_mask))
 
         eval_args = [
-            (ii, eval, tr_video_data, tr_scaler, fisher_vectors,
-             slice_vw_counts, slice_vw_l2_norms, video_mask, visual_word_mask,
-             prediction_type, te_outfile, verbose)
+            (ii, eval, tr_video_data, tr_scaler, agg_slice_data, video_mask,
+             visual_word_mask, prediction_type, verbose)
             for ii in xrange(eval.nr_classes)]
         evaluator = threads.ParallelIter(nr_threads, eval_args, evaluate_worker)
 
