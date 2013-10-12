@@ -294,11 +294,11 @@ def approx_l2_normalize(data, l2_norms, counts):
 
 
 def approximate_video_scores(
-    slice_scores, slice_counts, slice_l2_norms, video_mask):
+    slice_scores, slice_counts, slice_l2_norms, nr_descriptors, video_mask):
 
-    video_scores = video_mask * slice_scores
-    video_counts = video_mask * slice_counts
-    video_l2_norms = video_mask * slice_l2_norms
+    video_scores = sum_and_scale_by(slice_scores, nr_descriptors, mask=video_mask)
+    video_counts = sum_and_scale_by(slice_counts, nr_descriptors, mask=video_mask)
+    video_l2_norms = sum_and_scale_by_squared(slice_l2_norms, nr_descriptors, mask=video_mask)
 
     zero_idxs = video_counts == 0
     masked_scores = np.ma.masked_array(video_scores, zero_idxs)
@@ -349,6 +349,11 @@ def scale_and_sum_by(data, coef, data_mask=None, coef_mask=None):
 def sum_and_scale_by(data, coef, mask=None):
     coef_ = coef[:, np.newaxis]
     return sum_by(data * coef_, mask=mask) / sum_by(coef_, mask=mask)
+
+
+def sum_and_scale_by_squared(data, coef, mask=None):
+    coef_ = coef[:, np.newaxis]
+    return sum_by(data * (coef_ ** 2), mask=mask) / sum_by(coef_, mask=mask) ** 2
 
 
 @my_cacher('np', 'np', 'np', 'np', 'cp', 'cp')
@@ -507,10 +512,11 @@ def evaluate_worker((
     weight, bias = compute_weights(clf, tr_data, tr_std=None)
 
     if prediction_type == 'approx':
-        slice_vw_counts = scale_by(slice_data.counts, slice_data.nr_descriptors, mask=video_mask)
         slice_vw_l2_norms = visual_word_l2_norm(slice_data.fisher_vectors, visual_word_mask)
         slice_vw_scores = visual_word_scores(slice_data.fisher_vectors, weight, bias, visual_word_mask)
-        predictions = approximate_video_scores(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, video_mask)
+        predictions = approximate_video_scores(
+            slice_vw_scores, slice_data.counts, slice_vw_l2_norms,
+            slice_data.nr_descriptors, video_mask)
     elif prediction_type == 'exact':
         # Aggregate slice data into video data.
         video_data = scale_and_sum_by(
@@ -663,15 +669,9 @@ def evaluation(
             print "\tTest data: %dx%d." % agg_slice_data.fisher_vectors.shape
 
         # Scale the FVs in the main program, to avoid blowing up the memory.
-        if prediction_type == 'approx':
-            if tr_scaler is not None:
-                agg_slice_data = agg_slice_data._replace(
-                    fisher_vectors=tr_scaler.transform(agg_slice_data.fisher_vectors))
+        if prediction_type == 'approx' and tr_scaler is not None:
             agg_slice_data = agg_slice_data._replace(
-                fisher_vectors=scale_by(
-                    agg_slice_data.fisher_vectors,
-                    agg_slice_data.nr_descriptors,
-                    mask=video_mask))
+                fisher_vectors=tr_scaler.transform(agg_slice_data.fisher_vectors))
 
         eval_args = [
             (ii, eval, tr_video_data, tr_scaler, agg_slice_data, video_mask,

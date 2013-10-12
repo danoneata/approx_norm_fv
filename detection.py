@@ -216,7 +216,7 @@ def exact_sliding_window(slice_data, clf, scaler, deltas):
 @timer
 def approx_sliding_window(
     slice_data, clf, scaler, deltas, visual_word_mask,
-    use_integral_values=True):
+    use_integral_values=False):
 
     def integral(X):
         return np.vstack((
@@ -228,17 +228,17 @@ def approx_sliding_window(
 
     # Prepare sliced data.
     fisher_vectors = scaler.transform(slice_data.fisher_vectors)
-    fisher_vectors = scale_by(slice_data.fisher_vectors, slice_data.nr_descriptors)
-    #slice_vw_counts = slice_data.counts
 
-    slice_vw_counts = scale_by(slice_data.counts, slice_data.nr_descriptors)
+    slice_vw_counts = slice_data.counts
     slice_vw_l2_norms = visual_word_l2_norm(fisher_vectors, visual_word_mask)
     slice_vw_scores = visual_word_scores(fisher_vectors, weights, bias, visual_word_mask)
+    nr_descriptors = slice_data.nr_descriptors
 
     if use_integral_values:
         slice_vw_counts = integral(slice_vw_counts)
         slice_vw_l2_norms = integral(slice_vw_l2_norms)
         slice_vw_scores = integral(slice_vw_scores)
+        nr_descriptors = integral(nr_descriptors[:, np.newaxis]).squeeze()
         build_mask = build_integral_sliding_window_mask
     else:
         build_mask = build_sliding_window_mask
@@ -252,13 +252,14 @@ def approx_sliding_window(
         mask = build_mask(N, nn)
 
         # Approximated predictions.
-        scores = approximate_video_scores(slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, mask)
+        scores = approximate_video_scores(
+            slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, nr_descriptors, mask)
         agg_begin_frames = slice_data.begin_frames[:N - nn + 1]
         agg_end_frames = slice_data.end_frames[nn - 1:] 
 
         assert len(scores) == len(agg_begin_frames) == len(agg_end_frames)
 
-        scores[np.isnan(scores)] = 0
+        scores[np.isnan(scores)] = -10000
         results += zip(agg_begin_frames, agg_end_frames, scores)
 
     return results
