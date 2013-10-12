@@ -611,7 +611,8 @@ def evaluation(
     if verbose:
         print "Loading test data."
 
-    te_outfile = ('/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_test_%d' + '%s.dat' % agg_suffix)
+    std_suffix = '_std' if empirical_standardization else ''
+    te_outfile = ('/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_test_%d' + '%s%s.dat' % (agg_suffix, std_suffix))
     te_samples, _ = dataset.get_data('test')
     CHUNK_SIZE = 1000
 
