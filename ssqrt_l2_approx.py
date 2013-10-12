@@ -296,9 +296,9 @@ def approx_l2_normalize(data, l2_norms, counts):
 def approximate_video_scores(
     slice_scores, slice_counts, slice_l2_norms, nr_descriptors, video_mask):
 
-    video_scores = sum_and_scale_by(slice_scores, nr_descriptors, mask=video_mask)
-    video_counts = sum_and_scale_by(slice_counts, nr_descriptors, mask=video_mask)
-    video_l2_norms = sum_and_scale_by_squared(slice_l2_norms, nr_descriptors, mask=video_mask)
+    video_scores = sum_by(slice_scores, video_mask) / sum_by(nr_descriptors, video_mask)
+    video_counts = sum_by(slice_counts, video_mask) / sum_by(nr_descriptors, video_mask)
+    video_l2_norms = sum_by(slice_l2_norms, video_mask) / sum_by(nr_descriptors, video_mask) ** 2
 
     zero_idxs = video_counts == 0
     masked_scores = np.ma.masked_array(video_scores, zero_idxs)
@@ -512,18 +512,17 @@ def evaluate_worker((
     weight, bias = compute_weights(clf, tr_data, tr_std=None)
 
     if prediction_type == 'approx':
+        slice_vw_counts = slice_data.counts * slice_data.nr_descriptors[:, np.newaxis]
         slice_vw_l2_norms = visual_word_l2_norm(slice_data.fisher_vectors, visual_word_mask)
         slice_vw_scores = visual_word_scores(slice_data.fisher_vectors, weight, bias, visual_word_mask)
         predictions = approximate_video_scores(
-            slice_vw_scores, slice_data.counts, slice_vw_l2_norms,
-            slice_data.nr_descriptors, video_mask)
+            slice_vw_scores, slice_vw_counts, slice_vw_l2_norms,
+            slice_data.nr_descriptors[:, np.newaxis], video_mask)
     elif prediction_type == 'exact':
         # Aggregate slice data into video data.
-        video_data = scale_and_sum_by(
-            slice_data.fisher_vectors,
-            slice_data.nr_descriptors,
-            data_mask=video_mask,
-            coef_mask=video_mask)
+        video_data = (
+            sum_by(slice_data.fisher_vectors, mask) /
+            sum_by(slice_data.nr_descriptors, mask)[:, np.newaxis])
 
         # Apply exact normalization on the test video data.
         video_data = power_normalize(video_data, 0.5) 
@@ -591,13 +590,12 @@ def load_normalized_tr_data(
         scaler = StandardScaler(with_mean=False)
         tr_video_data = scaler.fit_transform(tr_video_data)
         
-        if nr_slices_to_aggregate > 1:
-            # Second pass through the data to correct the L2 norms.
-            suffix = '_%s_%s' % ('std', sqrt_type)
-            tr_std_outfile = tr_outfile % suffix
-            (_, _, _, tr_video_l2_norms) = load_train_video_data(
-                 dataset, nr_slices_to_aggregate=nr_slices_to_aggregate,
-                 outfile=tr_std_outfile, verbose=verbose, std_scaler=scaler)
+        # Second pass through the data to correct the L2 norms.
+        suffix = '_%s_%s' % ('std', sqrt_type)
+        tr_std_outfile = tr_outfile % suffix
+        (_, _, _, tr_video_l2_norms) = load_train_video_data(
+             dataset, nr_slices_to_aggregate=nr_slices_to_aggregate,
+             outfile=tr_std_outfile, verbose=verbose, std_scaler=scaler)
     else:
         scaler = None
 
@@ -658,7 +656,11 @@ def evaluation(
         fisher_vectors, counts, nr_descs, nr_slices, _, te_labels = load_slices(
             dataset, te_samples, outfile=(te_outfile % ii), verbose=verbose)
         slice_data = SliceData(fisher_vectors, counts, nr_descs)
+
         agg_slice_data = slice_aggregator(slice_data, nr_slices, nr_slices_to_aggregate)
+        agg_slice_data = agg_slice_data._replace(
+            fisher_vectors=(agg_slice_data.fisher_vectors *
+                            agg_slice_data.nr_descriptors[:, np.newaxis]))
 
         video_mask = build_aggregation_mask(
             sum([[ii] * int(np.ceil(float(nn) / nr_slices_to_aggregate))
