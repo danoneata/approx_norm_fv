@@ -185,7 +185,8 @@ def aggregate(slice_data, nn):
 
 
 @timer
-def exact_sliding_window(slice_data, clf, scaler, deltas):
+def exact_sliding_window(
+    slice_data, clf, scaler, deltas, sqrt_type='', l2_norm_type=''):
 
     results = [] 
     weights, bias = clf
@@ -198,10 +199,12 @@ def exact_sliding_window(slice_data, clf, scaler, deltas):
 
         # Normalize aggregated data.
         agg_fisher_vectors = agg_data.fisher_vectors
-        agg_fisher_vectors = power_normalize(agg_fisher_vectors, 0.5)
+        if sqrt_type != 'none':
+            agg_fisher_vectors = power_normalize(agg_fisher_vectors, 0.5)
         if scaler is not None:
             agg_fisher_vectors = scaler.transform(agg_fisher_vectors)
-        agg_fisher_vectors = L2_normalize(agg_fisher_vectors)
+        if l2_norm_type != 'none':
+            agg_fisher_vectors = L2_normalize(agg_fisher_vectors)
 
         nan_idxs = np.isnan(agg_fisher_vectors)
         agg_fisher_vectors[nan_idxs] = 0
@@ -269,7 +272,7 @@ def approx_sliding_window(
     return results
 
 
-def evaluation(algo_type, src_cfg, class_idx, deltas, e_std, verbose=0):
+def evaluation(algo_type, src_cfg, class_idx, deltas, verbose=0):
 
     dataset = Dataset(CFG[src_cfg]['dataset_name'], **CFG[src_cfg]['dataset_params'])
     D, K = 64, dataset.VOC_SIZE
@@ -279,13 +282,20 @@ def evaluation(algo_type, src_cfg, class_idx, deltas, e_std, verbose=0):
     SAMPID = '%s-frames-%d-%d'
     NR_SLICES_TO_AGG = 1
     ALGO_PARAMS = {
-        'exact': {
-            'train_params': {'l2_norm_type': 'exact', 'sqrt_type': 'exact'},
+        'none': {
+            'train_params': {'l2_norm_type': 'none', 'empirical_standardization': False, 'sqrt_type': 'none'},
             'sliding_window': exact_sliding_window,
+            'sliding_window_params': {'l2_norm_type': 'none', 'sqrt_type': 'none'},
+        },
+        'exact': {
+            'train_params': {'l2_norm_type': 'exact', 'empirical_standardization': True, 'sqrt_type': 'exact'},
+            'sliding_window': exact_sliding_window,
+            'sliding_window_params': {'l2_norm_type': 'exact', 'sqrt_type': 'exact'},
         },
         'approx': {
-            'train_params': {'l2_norm_type': 'approx', 'sqrt_type': 'approx'},
-            'sliding_window': lambda te_slice_data, clf, tr_std, deltas: approx_sliding_window(te_slice_data, clf, tr_std, deltas, visual_word_mask),
+            'train_params': {'l2_norm_type': 'approx', 'empirical_standardization': True, 'sqrt_type': 'approx'},
+            'sliding_window': approx_sliding_window,
+            'sliding_window_params': {'visual_word_mask': visual_word_mask},
         },
     }
 
@@ -293,7 +303,7 @@ def evaluation(algo_type, src_cfg, class_idx, deltas, e_std, verbose=0):
         
     tr_video_data, tr_video_labels, tr_std = load_normalized_tr_data(
         dataset, NR_SLICES_TO_AGG, tr_outfile=tr_outfile, verbose=verbose,
-        empirical_standardization=e_std, **ALGO_PARAMS[algo_type]['train_params'])
+        **ALGO_PARAMS[algo_type]['train_params'])
 
     # Sub-sample data.
     no_tuple_labels = np.array([ll[0] for ll in tr_video_labels])
@@ -309,7 +319,9 @@ def evaluation(algo_type, src_cfg, class_idx, deltas, e_std, verbose=0):
     te_slice_data = SliceData(*load_data_delta_0(dataset, MOVIE, class_idx, outfile=te_outfile))
 
     clf = compute_weights(eval.get_classifier(), class_tr_video_data)
-    results = ALGO_PARAMS[algo_type]['sliding_window'](te_slice_data, clf, tr_std, deltas)
+    results = ALGO_PARAMS[algo_type]['sliding_window'](
+        te_slice_data, clf, tr_std, deltas,
+        **ALGO_PARAMS[algo_type]['sliding_window_params'])
     
     class_name = dataset.IDX2CLS[class_idx]
     gt_path = os.path.join(dataset.FL_DIR, 'keyframes_test_%s.list' % class_name)
@@ -328,11 +340,8 @@ def main():
         '-d', '--dataset', required=True, choices=('cc', ),
         help="which dataset.")
     parser.add_argument(
-        '--exact', action='store_true', default=False,
-        help="uses exact normalizations at both train and test time.")
-    parser.add_argument(
-        '-e_std', '--empirical_standardization', default=False,
-        action='store_true', help="normalizes data to have unit variance.")
+        '-a', '--algorithm', required=True, choices=('none', 'approx', 'exact'),
+        help="specifies the type of normalizations.")
     parser.add_argument(
         '--class_idx', default=1, type=int,
         help="index of the class to evaluate.")
@@ -343,11 +352,10 @@ def main():
         '-v', '--verbose', action='count', help="verbosity level.")
 
     args = parser.parse_args()
-    algo_type = 'exact' if args.exact else 'approx'
 
     evaluation(
-        algo_type, args.dataset, args.class_idx, args.deltas,
-        args.empirical_standardization, verbose=args.verbose)
+        args.algorithm, args.dataset, args.class_idx, args.deltas,
+        verbose=args.verbose)
 
 
 if __name__ == '__main__':
