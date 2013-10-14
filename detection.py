@@ -61,7 +61,7 @@ def timer(func):
     def timed_func(*args, **kwargs):
         start = time.time()
         out = func(*args, **kwargs)
-        print "Elapsed %.3f s." % (time.time() - start)
+        print "Elapsed %.1f s." % (time.time() - start)
         return out
     return timed_func
 
@@ -345,16 +345,17 @@ def main():
     parser.add_argument(
         '--class_idx', default=1, type=int,
         help="index of the class to evaluate.")
-    parser.add_argument(
-        '-D', '--deltas', nargs='+', type=int,
-        help="slice lengths to evaluate.")
+    parser.add_argument('-D', '--delta', type=int, help="base slice length.")
+    parser.add_argument('--begin', type=int, help="smallest slice length.")
+    parser.add_argument('--end', type=int, help="largest slice length.")
     parser.add_argument(
         '-v', '--verbose', action='count', help="verbosity level.")
 
     args = parser.parse_args()
 
+    deltas = range(args.begin, args.end + args.delta, args.delta)
     evaluation(
-        args.algorithm, args.dataset, args.class_idx, args.deltas,
+        args.algorithm, args.dataset, args.class_idx, deltas,
         verbose=args.verbose)
 
 
