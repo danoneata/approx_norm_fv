@@ -521,8 +521,8 @@ def evaluate_worker((
     elif prediction_type == 'exact':
         # Aggregate slice data into video data.
         video_data = (
-            sum_by(slice_data.fisher_vectors, mask) /
-            sum_by(slice_data.nr_descriptors, mask)[:, np.newaxis])
+            sum_by(slice_data.fisher_vectors, video_mask) /
+            sum_by(slice_data.nr_descriptors, video_mask)[:, np.newaxis])
 
         # Apply exact normalization on the test video data.
         video_data = power_normalize(video_data, 0.5) 
