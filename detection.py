@@ -22,6 +22,7 @@ from load_data import load_sample_data
 from result_file_functions import get_det_ap
 
 from ssqrt_l2_approx import approximate_video_scores
+from ssqrt_l2_approx import build_slice_agg_mask
 from ssqrt_l2_approx import build_visual_word_mask
 from ssqrt_l2_approx import compute_weights
 from ssqrt_l2_approx import load_normalized_tr_data
@@ -100,7 +101,7 @@ def load_data_delta_0(
 
         # Read sufficient statistics and associated information.
         sample_fisher_vectors, _, sample_counts, sample_info = load_sample_data(
-            dataset, sample, **LOAD_SAMPLE_DATA_PARAMS)
+            dataset, sample, analytical_fim=True, **LOAD_SAMPLE_DATA_PARAMS)
 
         sample_nr_descs = sample_info['nr_descs']
 
@@ -151,14 +152,27 @@ def build_integral_sliding_window_mask(N, nn):
     return sparse.csr_matrix(mask)
 
 
-def aggregate(slice_data, nn):
+def aggregate(slice_data, nn, agg_type):
     """Aggregates slices of data into `N` slices."""
 
     fisher_vectors = slice_data.fisher_vectors
     N = fisher_vectors.shape[0] 
 
+    P = {
+        'overlap': {
+            'mask_builder': build_sliding_window_mask,
+            'begin_frame_idxs': slice(0, N - nn + 1),
+            'end_frame_idxs': slice(nn - 1, N),
+        },
+        'no_overlap': {
+            'mask_builder': build_slice_agg_mask,
+            'begin_frame_idxs': slice(0, N, nn),
+            'end_frame_idxs': slice(0, N, nn),
+        },
+    }
+
     # Build mask for aggregation.
-    sparse_mask = build_sliding_window_mask(N, nn)
+    sparse_mask = P[agg_type]['mask_builder'](N, nn)
 
     # Scale by number of descriptors and sum.
     agg_fisher_vectors = sum_and_scale_by(
@@ -170,11 +184,11 @@ def aggregate(slice_data, nn):
     agg_counts[np.isnan(agg_counts)] = 0
 
     # Sum number of descriptors.
-    agg_nr_descs = sum_by(slice_data.counts, mask=sparse_mask)
+    agg_nr_descs = sum_by(slice_data.nr_descriptors, mask=sparse_mask)
 
     # Correct begin frames and end frames.
-    agg_begin_frames = slice_data.begin_frames[:N - nn + 1]
-    agg_end_frames = slice_data.end_frames[nn - 1:] 
+    agg_begin_frames = slice_data.begin_frames[P[agg_type]['begin_frame_idxs']]
+    agg_end_frames = slice_data.end_frames[P[agg_type]['end_frame_idxs']] 
 
     assert len(agg_fisher_vectors) == len(agg_begin_frames) == len(agg_end_frames)
 
@@ -186,7 +200,7 @@ def aggregate(slice_data, nn):
 
 @timer
 def exact_sliding_window(
-    slice_data, clf, scaler, deltas, sqrt_type='', l2_norm_type=''):
+    slice_data, clf, scalers, deltas, sqrt_type='', l2_norm_type=''):
 
     results = [] 
     weights, bias = clf
@@ -195,14 +209,16 @@ def exact_sliding_window(
 
         # Aggregate data into bigger slices.
         nr_agg = delta / DELTA_0
-        agg_data = aggregate(slice_data, nr_agg)
+        agg_data = aggregate(slice_data, nr_agg, 'overlap')
 
         # Normalize aggregated data.
+        if scalers[0] is not None:
+            agg_fisher_vectors = scalers[0].transform(agg_fisher_vectors)
         agg_fisher_vectors = agg_data.fisher_vectors
         if sqrt_type != 'none':
             agg_fisher_vectors = power_normalize(agg_fisher_vectors, 0.5)
-        if scaler is not None:
-            agg_fisher_vectors = scaler.transform(agg_fisher_vectors)
+        if scalers[1] is not None:
+            agg_fisher_vectors = scalers[1].transform(agg_fisher_vectors)
         if l2_norm_type != 'none':
             agg_fisher_vectors = L2_normalize(agg_fisher_vectors)
 
@@ -218,7 +234,7 @@ def exact_sliding_window(
 
 @timer
 def approx_sliding_window(
-    slice_data, clf, scaler, deltas, visual_word_mask,
+    slice_data, clf, scalers, deltas, visual_word_mask,
     use_integral_values=True):
 
     def integral(X):
@@ -230,7 +246,11 @@ def approx_sliding_window(
     weights, bias = clf
 
     # Prepare sliced data.
-    fisher_vectors = scaler.transform(slice_data.fisher_vectors)
+    fisher_vectors = slice_data.fisher_vectors
+    for scaler in scalers:
+        if scaler is None:
+            continue
+        fisher_vectors = scaler.transform(fisher_vectors)
     nr_descriptors_T = slice_data.nr_descriptors[:, np.newaxis]
 
     # Multiply by the number of descriptors.
@@ -272,7 +292,7 @@ def approx_sliding_window(
     return results
 
 
-def evaluation(algo_type, src_cfg, class_idx, deltas, verbose=0):
+def evaluation(algo_type, src_cfg, class_idx, stride, deltas, verbose=0):
 
     dataset = Dataset(CFG[src_cfg]['dataset_name'], **CFG[src_cfg]['dataset_params'])
     D, K = 64, dataset.VOC_SIZE
@@ -280,30 +300,36 @@ def evaluation(algo_type, src_cfg, class_idx, deltas, verbose=0):
 
     MOVIE = 'cac.mpg'
     SAMPID = '%s-frames-%d-%d'
-    NR_SLICES_TO_AGG = 1
     ALGO_PARAMS = {
         'none': {
-            'train_params': {'l2_norm_type': 'none', 'empirical_standardization': False, 'sqrt_type': 'none'},
+            'train_params': {'l2_norm_type': 'none', 'empirical_standardizations': [False, False], 'sqrt_type': 'none'},
             'sliding_window': exact_sliding_window,
             'sliding_window_params': {'l2_norm_type': 'none', 'sqrt_type': 'none'},
         },
         'exact': {
-            'train_params': {'l2_norm_type': 'exact', 'empirical_standardization': True, 'sqrt_type': 'exact'},
+            'train_params': {'l2_norm_type': 'exact', 'empirical_standardizations': [False, True], 'sqrt_type': 'exact'},
             'sliding_window': exact_sliding_window,
             'sliding_window_params': {'l2_norm_type': 'exact', 'sqrt_type': 'exact'},
         },
         'approx': {
-            'train_params': {'l2_norm_type': 'approx', 'empirical_standardization': True, 'sqrt_type': 'approx'},
+            'train_params': {'l2_norm_type': 'approx', 'empirical_standardizations': [False, True], 'sqrt_type': 'approx'},
             'sliding_window': approx_sliding_window,
             'sliding_window_params': {'visual_word_mask': visual_word_mask},
         },
     }
 
-    tr_outfile = '/scratch2/clear/oneata/tmp/joblib/%s_cls%d_train%s.dat' % (src_cfg, class_idx, '%s')
-        
-    tr_video_data, tr_video_labels, tr_std = load_normalized_tr_data(
-        dataset, NR_SLICES_TO_AGG, tr_outfile=tr_outfile, verbose=verbose,
-        **ALGO_PARAMS[algo_type]['train_params'])
+    nr_agg = stride / CFG[src_cfg]['chunk_size']
+    tr_nr_agg = te_nr_agg = nr_agg
+
+    # For the old C&C features I have one FV for the entire sample for the
+    # train data, so I cannot aggregate.
+    if src_cfg == 'cc':
+        tr_nr_agg = 1
+
+    tr_outfile = '/scratch2/clear/oneata/tmp/joblib/%s_cls%d_train.dat' % (src_cfg, class_idx)
+    tr_video_data, tr_video_labels, tr_stds = load_normalized_tr_data(
+        dataset, tr_nr_agg, tr_outfile=tr_outfile, verbose=verbose,
+        analytical_fim=True, **ALGO_PARAMS[algo_type]['train_params'])
 
     # Sub-sample data.
     no_tuple_labels = np.array([ll[0] for ll in tr_video_labels])
@@ -317,10 +343,11 @@ def evaluation(algo_type, src_cfg, class_idx, deltas, verbose=0):
 
     te_outfile = '/scratch2/clear/oneata/tmp/joblib/%s_cls%d_test.dat' % (src_cfg, class_idx)
     te_slice_data = SliceData(*load_data_delta_0(dataset, MOVIE, class_idx, outfile=te_outfile))
+    agg_slice_data = aggregate(te_slice_data, te_nr_agg, 'no_overlap')
 
     clf = compute_weights(eval.get_classifier(), class_tr_video_data)
     results = ALGO_PARAMS[algo_type]['sliding_window'](
-        te_slice_data, clf, tr_std, deltas,
+        agg_slice_data, clf, tr_stds, deltas,
         **ALGO_PARAMS[algo_type]['sliding_window_params'])
     
     class_name = dataset.IDX2CLS[class_idx]
@@ -345,6 +372,7 @@ def main():
     parser.add_argument(
         '--class_idx', default=1, type=int,
         help="index of the class to evaluate.")
+    parser.add_argument('-S', '--stride', type=int, help="window displacement step size.")
     parser.add_argument('-D', '--delta', type=int, help="base slice length.")
     parser.add_argument('--begin', type=int, help="smallest slice length.")
     parser.add_argument('--end', type=int, help="largest slice length.")
@@ -352,10 +380,15 @@ def main():
         '-v', '--verbose', action='count', help="verbosity level.")
 
     args = parser.parse_args()
-
     deltas = range(args.begin, args.end + args.delta, args.delta)
+
+    # Some checking.
+    assert args.stride % CFG[args.dataset]['chunk_size'] == 0
+    for delta in deltas:
+        assert delta % args.stride == 0
+
     evaluation(
-        args.algorithm, args.dataset, args.class_idx, deltas,
+        args.algorithm, args.dataset, args.class_idx, args.stride, deltas,
         verbose=args.verbose)
 
 

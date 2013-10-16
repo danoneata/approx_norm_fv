@@ -137,7 +137,6 @@ CFG.update(hmdb_stab_dict)
 
 
 LOAD_SAMPLE_DATA_PARAMS = {
-    'analytical_fim' : True,
     'pi_derivatives' : False,
     'sqrt_nr_descs'  : False,
     'return_info'    : True,
@@ -357,7 +356,7 @@ def sum_and_scale_by_squared(data, coef, mask=None):
 
 
 @my_cacher('np', 'np', 'np', 'np', 'cp', 'cp')
-def load_slices(dataset, samples, outfile=None, verbose=0):
+def load_slices(dataset, samples, analytical_fim=True, outfile=None, verbose=0):
 
     counts = []
     fisher_vectors = []
@@ -368,7 +367,9 @@ def load_slices(dataset, samples, outfile=None, verbose=0):
 
     for jj, sample in enumerate(samples):
 
-        fv, ii, cc, info = load_sample_data(dataset, sample, **LOAD_SAMPLE_DATA_PARAMS)
+        fv, ii, cc, info = load_sample_data(
+            dataset, sample, analytical_fim=analytical_fim,
+            **LOAD_SAMPLE_DATA_PARAMS)
 
         if sample.movie in names:
             continue
@@ -452,7 +453,7 @@ def compute_accuracy(label_binarizer, true_labels, predictions, verbose=0):
 
 
 def evaluate_worker((
-    cls, eval, tr_data, tr_scaler, slice_data, video_mask, visual_word_mask,
+    cls, eval, tr_data, tr_scalers, slice_data, video_mask, visual_word_mask,
     prediction_type, verbose)):
 
     clf = eval.get_classifier(cls)
@@ -472,9 +473,11 @@ def evaluate_worker((
             sum_by(slice_data.nr_descriptors, video_mask)[:, np.newaxis])
 
         # Apply exact normalization on the test video data.
+        if tr_scalers[0] is not None:
+            video_data = tr_scalers[0].transform(video_data)
         video_data = power_normalize(video_data, 0.5) 
-        if tr_scaler is not None:
-            video_data = tr_scaler.transform(video_data)
+        if tr_scalers[1] is not None:
+            video_data = tr_scalers[1].transform(video_data)
         video_data = exact_l2_normalize(video_data) 
 
         # Apply linear classifier.
@@ -489,8 +492,8 @@ def evaluate_worker((
 
 
 def load_normalized_tr_data(
-    dataset, nr_slices_to_aggregate, l2_norm_type, empirical_standardization,
-    sqrt_type, tr_outfile, verbose):
+    dataset, nr_slices_to_aggregate, l2_norm_type, empirical_standardizations,
+    sqrt_type, analytical_fim, tr_outfile, verbose):
 
     D, K = 64, dataset.VOC_SIZE
 
@@ -499,7 +502,8 @@ def load_normalized_tr_data(
     samples, _ = dataset.get_data('train')
     (slice_fisher_vectors, slice_counts,
      slice_nr_descs, nr_slices, _, tr_video_labels) = load_slices(
-         dataset, samples, outfile=(tr_outfile % '_slices'), verbose=verbose)
+         dataset, samples, analytical_fim, outfile=tr_outfile,
+         verbose=verbose)
 
     # Simulate `nr_slices_to_aggregate` times bigger slices than the base
     # length.
@@ -530,8 +534,10 @@ def load_normalized_tr_data(
 
     if verbose:
         print "Normalizing train data."
+        print "\tAnalytical Fisher information matrix:", analytical_fim
+        print "\tEmpirical standardization:", empirical_standardizations[0]
         print "\tSigned square rooting:", sqrt_type
-        print "\tEmpirical standardization:", empirical_standardization
+        print "\tEmpirical standardization:", empirical_standardizations[1]
         print "\tL2 norm:", l2_norm_type
 
     def l2_normalize(data):
@@ -563,26 +569,38 @@ def load_normalized_tr_data(
         else:
             assert False
 
+    scalers = []
+
+    if empirical_standardizations[0]:
+        scaler = StandardScaler(with_mean=False)
+        tr_video_data = scaler.fit_transform(tr_video_data)
+        tr_slice_data = scaler.transform(tr_slice_data)
+        scalers.append(scaler)
+    else:
+        scalers.append(None)
+
     # Square rooting.
     tr_video_data = square_root(tr_video_data)
 
     # Empirical standardization.
-    if empirical_standardization:
+    if empirical_standardizations[1]:
         scaler = StandardScaler(with_mean=False)
         tr_video_data = scaler.fit_transform(tr_video_data)
         tr_slice_data = scaler.transform(tr_slice_data)
+        scalers.append(scaler)
     else:
-        scaler = None
+        scalers.append(None)
 
     # L2 normalization ("true" or "approx").
     tr_video_data = l2_normalize(tr_video_data)
 
-    return tr_video_data, tr_video_labels, scaler
+    return tr_video_data, tr_video_labels, scalers
 
 
 def evaluation(
-    src_cfg, sqrt_type, empirical_standardization, l2_norm_type,
-    prediction_type, nr_slices_to_aggregate=1, nr_threads=4, verbose=0):
+    src_cfg, sqrt_type, empirical_standardizations, l2_norm_type,
+    prediction_type, analytical_fim, nr_slices_to_aggregate=1, nr_threads=4,
+    verbose=0):
 
     dataset = Dataset(CFG[src_cfg]['dataset_name'], **CFG[src_cfg]['dataset_params'])
     D, K = 64, dataset.VOC_SIZE
@@ -590,13 +608,14 @@ def evaluation(
     if verbose:
         print "Loading train data."
 
-    generic_tr_outfile = '/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_train%s%s.dat'
-    agg_suffix = '_aggregated_%d' % nr_slices_to_aggregate
-    tr_outfile = generic_tr_outfile % (agg_suffix, '%s')
+    generic_tr_outfile = '/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_train%s.dat'
+    afim_suffix = '_afim_%s' % analytical_fim
+    tr_outfile = generic_tr_outfile % afim_suffix
 
-    tr_video_data, tr_video_labels, tr_scaler = load_normalized_tr_data(
+    tr_video_data, tr_video_labels, tr_scalers = load_normalized_tr_data(
         dataset, nr_slices_to_aggregate, l2_norm_type,
-        empirical_standardization, sqrt_type, tr_outfile, verbose)
+        empirical_standardizations, sqrt_type, analytical_fim, tr_outfile,
+        verbose)
 
     # Computing kernel.
     tr_kernel = np.dot(tr_video_data, tr_video_data.T)
@@ -614,7 +633,7 @@ def evaluation(
     if verbose:
         print "Loading test data."
 
-    te_outfile = ('/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_test_%d.dat')
+    te_outfile = ('/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_test%s_%d.dat')
     te_samples, _ = dataset.get_data('test')
     CHUNK_SIZE = 1000
     visual_word_mask = build_visual_word_mask(D, K)
@@ -628,8 +647,10 @@ def evaluation(
             print "\tPart %3d from %5d to %5d." % (ii, low, low + CHUNK_SIZE)
             print "\tEvaluating on %d threads." % nr_threads
 
+        te_outfile_ii = te_outfile % (afim_suffix, ii)
         fisher_vectors, counts, nr_descs, nr_slices, _, te_labels = load_slices(
-            dataset, te_samples, outfile=(te_outfile % ii), verbose=verbose)
+            dataset, te_samples, analytical_fim, outfile=te_outfile_ii,
+            verbose=verbose)
         slice_data = SliceData(fisher_vectors, counts, nr_descs)
 
         agg_slice_data = slice_aggregator(slice_data, nr_slices, nr_slices_to_aggregate)
@@ -645,13 +666,19 @@ def evaluation(
         if verbose:
             print "\tTest data: %dx%d." % agg_slice_data.fisher_vectors.shape
 
-        # Scale the FVs in the main program, to avoid blowing up the memory.
-        if prediction_type == 'approx' and tr_scaler is not None:
-            agg_slice_data = agg_slice_data._replace(
-                fisher_vectors=tr_scaler.transform(agg_slice_data.fisher_vectors))
+        # Scale the FVs in the main program, to avoid blowing up the memory
+        # when doing multi-threading, since each thread will make a copy of the
+        # data when transforming the data.
+        if prediction_type == 'approx':
+            for tr_scaler in tr_scalers:
+                if tr_scaler is None:
+                    continue
+                agg_slice_data = agg_slice_data._replace(
+                    fisher_vectors=tr_scaler.transform(
+                        agg_slice_data.fisher_vectors))
 
         eval_args = [
-            (ii, eval, tr_video_data, tr_scaler, agg_slice_data, video_mask,
+            (ii, eval, tr_video_data, tr_scalers, agg_slice_data, video_mask,
              visual_word_mask, prediction_type, verbose)
             for ii in xrange(eval.nr_classes)]
         evaluator = threads.ParallelIter(nr_threads, eval_args, evaluate_worker)
@@ -689,8 +716,17 @@ def main():
         '--exact', action='store_true', default=False,
         help="uses exact normalizations at both train and test time.")
     parser.add_argument(
-        '-e_std', '--empirical_standardization', default=False,
-        action='store_true', help="normalizes data to have unit variance.")
+        '--e_std_1', default=False, action='store_true',
+        help=("applies empirical standardization at the first stage, before "
+              "square rooting."))
+    parser.add_argument(
+        '--e_std_2', default=False, action='store_true',
+        help=("applies empirical standardization at the second stage, after "
+              "square rooting."))
+    parser.add_argument(
+        '--no_afim', default=False, action='store_true',
+        help=("uses FVs that are standardized with the analytical Fisher "
+              "information matrix."))
     parser.add_argument(
         '--train_l2_norm', choices={'exact', 'approx'}, required=True,
         help="how to apply L2 normalization at train time.")
@@ -712,9 +748,13 @@ def main():
         tr_l2_norm = 'exact'
         pred_type = 'exact'
 
+    analytical_fim = not args.no_afim
+    empirical_standardizations = [args.e_std_1, args.e_std_2]
+
     evaluation(
-        args.dataset, tr_sqrt, args.empirical_standardization, tr_l2_norm,
-        pred_type, nr_slices_to_aggregate=args.nr_slices_to_aggregate,
+        args.dataset, tr_sqrt, empirical_standardizations, tr_l2_norm,
+        pred_type, analytical_fim,
+        nr_slices_to_aggregate=args.nr_slices_to_aggregate,
         nr_threads=args.nr_threads, verbose=args.verbose)
 
 
