@@ -424,59 +424,6 @@ def slice_aggregator(slice_data, nr_slices, nr_agg):
     return SliceData(agg_fisher_vectors, agg_counts, agg_nr_descs)
 
 
-@my_cacher('np', 'cp', 'np', 'np')
-def load_train_video_data(
-    dataset, nr_slices_to_aggregate=1, outfile=None, verbose=0,
-    std_scaler=None):
-
-    samples, _ = dataset.get_data('train')
-    nr_samples = len(samples)
-
-    D, K = 64, dataset.VOC_SIZE
-    vw_mask = build_visual_word_mask(D, K)
-
-    # Pre-allocate.
-    data = np.zeros((nr_samples, 2 * D * K), dtype=np.float32)
-    counts = np.zeros((nr_samples, K), dtype=np.float32)
-    l2_norms = np.zeros((nr_samples, K), dtype=np.float32)
-    labels = []
-
-    ii = 0
-    seen_samples = []
-
-    for sample in samples:
-
-        if str(sample) in seen_samples:
-            continue
-        seen_samples.append(str(sample))
-
-        fisher_vectors, _, slice_counts, info = load_sample_data(
-            dataset, sample, **LOAD_SAMPLE_DATA_PARAMS)
-        nr_descriptors = info['nr_descs']
-        nr_descriptors = nr_descriptors[nr_descriptors != 0]
-
-        if std_scaler is not None:
-            fisher_vectors = std_scaler.transform(fisher_vectors)
-
-        slice_agg_mask = build_slice_agg_mask(fisher_vectors.shape[0], nr_slices_to_aggregate)
-        agg_fisher_vectors = scale_and_sum_by(fisher_vectors, nr_descriptors, data_mask=slice_agg_mask)
-
-        data[ii] = scale_and_sum_by(fisher_vectors, nr_descriptors)
-        counts[ii] = scale_and_sum_by(slice_counts, nr_descriptors)
-        l2_norms[ii] = sum_by(visual_word_l2_norm(agg_fisher_vectors, vw_mask))
-
-        labels.append(info['label'])
-
-        if verbose:
-            print '%5d %5d %s' % (ii, agg_fisher_vectors.shape[0], sample.movie)
-
-        ii += 1
-
-    # The counter `ii` can be smaller than `nr_samples` when there are
-    # duplicates in the `samples` as is the case of Hollywood2.
-    return data[:ii], labels[:ii], counts[:ii], l2_norms[:ii]
-
-
 def compute_average_precision(true_labels, predictions, verbose=0):
     average_precisions = []
     for ii in sorted(true_labels.keys()):
@@ -545,11 +492,41 @@ def load_normalized_tr_data(
     dataset, nr_slices_to_aggregate, l2_norm_type, empirical_standardization,
     sqrt_type, tr_outfile, verbose):
 
-    # Load all the train data at once as it's presuambly small (no slices needed).
-    (tr_video_data, tr_video_labels, tr_video_counts,
-     tr_video_l2_norms) = load_train_video_data(
-         dataset, nr_slices_to_aggregate=nr_slices_to_aggregate,
-         outfile=(tr_outfile % ''), verbose=verbose)
+    D, K = 64, dataset.VOC_SIZE
+
+    # Load slices for train data, because I need to propaget the empirical
+    # standardization into the slice L2 norms.
+    samples, _ = dataset.get_data('train')
+    (slice_fisher_vectors, slice_counts,
+     slice_nr_descs, nr_slices, _, tr_video_labels) = load_slices(
+         dataset, samples, outfile=(tr_outfile % '_slices'), verbose=verbose)
+
+    # Simulate `nr_slices_to_aggregate` times bigger slices than the base
+    # length.
+    slice_data = SliceData(slice_fisher_vectors, slice_counts, slice_nr_descs)
+    agg_slice_data = slice_aggregator(
+        slice_data, nr_slices, nr_slices_to_aggregate)
+
+
+    # Build video mask.
+    video_mask = build_aggregation_mask(
+        sum([[ii] * int(np.ceil(float(nn) / nr_slices_to_aggregate))
+             for ii, nn in enumerate(nr_slices)],
+            []))
+
+    # Scale slices by the number of descriptors.
+    tr_slice_data = scale_by(
+        agg_slice_data.fisher_vectors,
+        agg_slice_data.nr_descriptors,
+        mask=video_mask)
+
+    # Aggregate Fisher vectors and counts per video.
+    tr_video_data = scale_and_sum_by(
+        agg_slice_data.fisher_vectors, agg_slice_data.nr_descriptors,
+        data_mask=video_mask, coef_mask=video_mask)
+    tr_video_counts = scale_and_sum_by(
+        agg_slice_data.counts, agg_slice_data.nr_descriptors,
+        data_mask=video_mask, coef_mask=video_mask)
 
     if verbose:
         print "Normalizing train data."
@@ -565,6 +542,10 @@ def load_normalized_tr_data(
                 counts = np.ones(tr_video_counts.shape)
             else:
                 counts = tr_video_counts
+            # Prepare the L2 norms using the possibly modified `tr_slice_data`.
+            vw_mask = build_visual_word_mask(D, K)
+            tr_video_l2_norms = sum_by(
+                visual_word_l2_norm(tr_slice_data, vw_mask), mask=video_mask)
             return approx_l2_normalize(data, tr_video_l2_norms, counts)
         elif l2_norm_type == 'none':
             return data
@@ -589,13 +570,7 @@ def load_normalized_tr_data(
     if empirical_standardization:
         scaler = StandardScaler(with_mean=False)
         tr_video_data = scaler.fit_transform(tr_video_data)
-        
-        # Second pass through the data to correct the L2 norms.
-        suffix = '_%s_%s' % ('std', sqrt_type)
-        tr_std_outfile = tr_outfile % suffix
-        (_, _, _, tr_video_l2_norms) = load_train_video_data(
-             dataset, nr_slices_to_aggregate=nr_slices_to_aggregate,
-             outfile=tr_std_outfile, verbose=verbose, std_scaler=scaler)
+        tr_slice_data = scaler.transform(tr_slice_data)
     else:
         scaler = None
 
