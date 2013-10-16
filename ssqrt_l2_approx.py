@@ -131,6 +131,20 @@ CFG = {
         'eval_params': {
         },
         'metric': 'average_precision',
+        'chunk_size': 30,
+    },
+    'cc.stab':{
+        'dataset_name': 'cc',
+        'dataset_params': {
+            'ip_type': 'dense5.track15mbh',
+            'nr_clusters': 128,
+            'suffix': '.stab',
+        },
+        'eval_name': 'cc',
+        'eval_params': {
+        },
+        'metric': 'average_precision',
+        'chunk_size': 1,
     },
 }
 CFG.update(hmdb_stab_dict)

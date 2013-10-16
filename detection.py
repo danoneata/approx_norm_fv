@@ -364,7 +364,7 @@ def main():
         description="Approximating the normalizations for the detection task.")
 
     parser.add_argument(
-        '-d', '--dataset', required=True, choices=('cc', ),
+        '-d', '--dataset', required=True, choices=('cc', 'cc.stab'),
         help="which dataset.")
     parser.add_argument(
         '-a', '--algorithm', required=True, choices=('none', 'approx', 'exact'),
