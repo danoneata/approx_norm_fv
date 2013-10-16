@@ -385,7 +385,7 @@ def load_slices(dataset, samples, analytical_fim=True, outfile=None, verbose=0):
             dataset, sample, analytical_fim=analytical_fim,
             **LOAD_SAMPLE_DATA_PARAMS)
 
-        if sample.movie in names:
+        if str(sample) in names:
             continue
 
         nd = info['nr_descs']
@@ -402,7 +402,7 @@ def load_slices(dataset, samples, analytical_fim=True, outfile=None, verbose=0):
         nr_descs.append(nd)
 
         nr_slices.append(fisher_vectors[-1].shape[0])
-        names.append(sample.movie)
+        names.append(str(sample))
         labels += [label]
 
         if verbose:
