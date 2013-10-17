@@ -45,6 +45,7 @@ from ssqrt_l2_approx import LOAD_SAMPLE_DATA_PARAMS
 # [ ] Mask with 1, -1 and integral quantities.
 
 
+TRACK_LEN = 15
 NULL_CLASS_IDX = 0
 SliceData = namedtuple(
     'SliceData', ['fisher_vectors', 'counts', 'nr_descriptors', 'begin_frames',
@@ -124,7 +125,7 @@ def load_data_delta_0(
 def build_sliding_window_mask(N, nn):
     """Builds mask to aggregate a vectors [x_1, x_2, ..., x_N] into
     [x_1 + ... + x_n, x_2 + ... + x_{n+1}, ...].
-    
+
     """
     mask = np.zeros((N - nn + 1, N))
     idxs = [
@@ -151,27 +152,63 @@ def build_integral_sliding_window_mask(N, nn):
     return sparse.csr_matrix(mask)
 
 
-def aggregate(slice_data, nn, agg_type):
+def builg_aggregation_mask_and_limits(
+    agg_type, delta, stride, n_slices, integral=False):
+    
+    if agg_type == 'overlap':
+
+        n_mask = delta / stride
+        n_frames = delta / stride
+
+        mask_builder = build_integral_sliding_window_mask if integral else build_sliding_window_mask
+
+        begin_frame_idxs = slice(0, n_slices - n_frames + 1)
+        end_frame_idxs = slice(n_frames - 1, n_slices)
+
+    elif agg_type == 'overlap_containing':
+        # Consider only tracks that are fully contained in the window.
+        assert (delta - TRACK_LEN) % stride == 0
+
+        n_mask = (delta - TRACK_LEN) / stride
+        n_frames = delta / stride
+
+        mask_builder = build_integral_sliding_window_mask if integral else build_sliding_window_mask
+
+        # TODO Fix this. The last frame doesn't have the proper length.
+        begin_frame_idxs = slice(0, n_slices - n_mask + 1)
+        end_frame_idxs = np.minimum(
+            n_slices - 1,
+            range(n_frames - 1, n_slices + n_frames - n_mask))
+
+    elif agg_type == 'no_overlap':
+
+        assert integral == False
+
+        n_mask = delta / stride
+        n_frames = delta / stride
+
+        mask_builder = build_slice_agg_mask
+
+        begin_frame_idxs = slice(0, n_slices, n_frames)
+        end_frame_idxs = np.minimum(
+            n_slices - 1,
+            range(n_frames - 1, n_slices + n_frames - 1, n_frames))
+
+    else:
+        assert False, "Unknown aggregation type %s." % agg_type
+
+    return mask_builder(n_slices, n_mask), begin_frame_idxs, end_frame_idxs
+
+
+def aggregate(slice_data, delta, stride, agg_type):
     """Aggregates slices of data into `N` slices."""
 
     fisher_vectors = slice_data.fisher_vectors
-    N = fisher_vectors.shape[0] 
-
-    P = {
-        'overlap': {
-            'mask_builder': build_sliding_window_mask,
-            'begin_frame_idxs': slice(0, N - nn + 1),
-            'end_frame_idxs': slice(nn - 1, N),
-        },
-        'no_overlap': {
-            'mask_builder': build_slice_agg_mask,
-            'begin_frame_idxs': slice(0, N, nn),
-            'end_frame_idxs': np.minimum(N - 1, range(nn - 1, N + nn - 1, nn)),
-        },
-    }
+    N = fisher_vectors.shape[0]
 
     # Build mask for aggregation.
-    sparse_mask = P[agg_type]['mask_builder'](N, nn)
+    sparse_mask, begin_frame_idxs, end_frame_idxs = builg_aggregation_mask_and_limits(
+        agg_type, delta, stride, N)
 
     # Scale by number of descriptors and sum.
     agg_fisher_vectors = sum_and_scale_by(
@@ -186,8 +223,8 @@ def aggregate(slice_data, nn, agg_type):
     agg_nr_descs = sum_by(slice_data.nr_descriptors, mask=sparse_mask)
 
     # Correct begin frames and end frames.
-    agg_begin_frames = slice_data.begin_frames[P[agg_type]['begin_frame_idxs']]
-    agg_end_frames = slice_data.end_frames[P[agg_type]['end_frame_idxs']] 
+    agg_begin_frames = slice_data.begin_frames[begin_frame_idxs]
+    agg_end_frames = slice_data.end_frames[end_frame_idxs]
 
     assert len(agg_fisher_vectors) == len(agg_begin_frames) == len(agg_end_frames)
 
@@ -201,14 +238,14 @@ def aggregate(slice_data, nn, agg_type):
 def exact_sliding_window(
     slice_data, clf, scalers, stride, deltas, sqrt_type='', l2_norm_type=''):
 
-    results = [] 
+    results = []
     weights, bias = clf
 
     for delta in deltas:
 
         # Aggregate data into bigger slices.
         nr_agg = delta / stride
-        agg_data = aggregate(slice_data, nr_agg, 'overlap')
+        agg_data = aggregate(slice_data, delta, stride, 'overlap_containing')
 
         # Normalize aggregated data.
         if scalers[0] is not None:
@@ -241,7 +278,7 @@ def approx_sliding_window(
             np.zeros((1, X.shape[1])),
             np.cumsum(X, axis=0)))
 
-    results = [] 
+    results = []
     weights, bias = clf
 
     # Prepare sliced data.
@@ -256,7 +293,7 @@ def approx_sliding_window(
     fisher_vectors = fisher_vectors * nr_descriptors_T
     slice_vw_counts = slice_data.counts * nr_descriptors_T
 
-    # 
+    #
     slice_vw_l2_norms = visual_word_l2_norm(fisher_vectors, visual_word_mask)
     slice_vw_scores = visual_word_scores(fisher_vectors, weights, bias, visual_word_mask)
 
@@ -274,17 +311,19 @@ def approx_sliding_window(
     for delta in deltas:
 
         # Build mask.
-        nn = delta / stride
-        mask = build_mask(N, nn)
+        mask, begin_frame_idxs, end_frame_idxs = builg_aggregation_mask_and_limits(
+            'overlap_containing', delta, stride, N,
+            integral=use_integral_values)
 
         # Approximated predictions.
         scores = approximate_video_scores(
             slice_vw_scores, slice_vw_counts, slice_vw_l2_norms, nr_descriptors_T, mask)
-        agg_begin_frames = slice_data.begin_frames[:N - nn + 1]
-        agg_end_frames = slice_data.end_frames[nn - 1:] 
+        agg_begin_frames = slice_data.begin_frames[begin_frame_idxs]
+        agg_end_frames = slice_data.end_frames[end_frame_idxs]
 
         assert len(scores) == len(agg_begin_frames) == len(agg_end_frames)
 
+        # TODO Change this -- it's horrible style and maybe incorrect!
         scores[np.isnan(scores)] = -10000
         results += zip(agg_begin_frames, agg_end_frames, scores)
 
@@ -301,24 +340,44 @@ def evaluation(algo_type, src_cfg, class_idx, stride, deltas, verbose=0):
     SAMPID = '%s-frames-%d-%d'
     ALGO_PARAMS = {
         'none': {
-            'train_params': {'l2_norm_type': 'none', 'empirical_standardizations': [False, False], 'sqrt_type': 'none'},
+            'train_params': {
+                'l2_norm_type': 'none',
+                'empirical_standardizations': [False, False],
+                'sqrt_type': 'none'
+            },
             'sliding_window': exact_sliding_window,
-            'sliding_window_params': {'l2_norm_type': 'none', 'sqrt_type': 'none'},
+            'sliding_window_params': {
+                'l2_norm_type': 'none',
+                'sqrt_type': 'none'
+            },
         },
         'exact': {
-            'train_params': {'l2_norm_type': 'exact', 'empirical_standardizations': [False, True], 'sqrt_type': 'exact'},
+            'train_params': {
+                'l2_norm_type': 'exact',
+                'empirical_standardizations': [False, True],
+                'sqrt_type': 'exact'
+            },
             'sliding_window': exact_sliding_window,
-            'sliding_window_params': {'l2_norm_type': 'exact', 'sqrt_type': 'exact'},
+            'sliding_window_params': {
+                'l2_norm_type': 'exact',
+                'sqrt_type': 'exact'
+            },
         },
         'approx': {
-            'train_params': {'l2_norm_type': 'approx', 'empirical_standardizations': [False, True], 'sqrt_type': 'approx'},
+            'train_params': {
+                'l2_norm_type': 'approx',
+                'empirical_standardizations': [False, True],
+                'sqrt_type': 'approx'
+            },
             'sliding_window': approx_sliding_window,
-            'sliding_window_params': {'visual_word_mask': visual_word_mask},
+            'sliding_window_params': {
+                'visual_word_mask': visual_word_mask
+            },
         },
     }
 
-    nr_agg = stride / CFG[src_cfg]['chunk_size']
-    tr_nr_agg = te_nr_agg = nr_agg
+    chunk_size = CFG[src_cfg]['chunk_size']
+    tr_nr_agg = stride / chunk_size
 
     # For the old C&C features I have one FV for the entire sample for the
     # train data, so I cannot aggregate.
@@ -342,15 +401,14 @@ def evaluation(algo_type, src_cfg, class_idx, stride, deltas, verbose=0):
 
     te_outfile = '/scratch2/clear/oneata/tmp/joblib/%s_cls%d_test.dat' % (src_cfg, class_idx)
     te_slice_data = SliceData(*load_data_delta_0(
-        dataset, MOVIE, class_idx, delta_0=CFG[src_cfg]['chunk_size'],
-        outfile=te_outfile))
-    agg_slice_data = aggregate(te_slice_data, te_nr_agg, 'no_overlap')
+        dataset, MOVIE, class_idx, delta_0=chunk_size, outfile=te_outfile))
+    agg_slice_data = aggregate(te_slice_data, stride, chunk_size, 'no_overlap')
 
     clf = compute_weights(eval.get_classifier(), class_tr_video_data)
     results = ALGO_PARAMS[algo_type]['sliding_window'](
         agg_slice_data, clf, tr_stds, stride, deltas,
         **ALGO_PARAMS[algo_type]['sliding_window_params'])
-    
+
     class_name = dataset.IDX2CLS[class_idx]
     gt_path = os.path.join(dataset.FL_DIR, 'keyframes_test_%s.list' % class_name)
     adrien_results = [
