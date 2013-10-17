@@ -45,7 +45,6 @@ from ssqrt_l2_approx import LOAD_SAMPLE_DATA_PARAMS
 # [ ] Mask with 1, -1 and integral quantities.
 
 
-DELTA_0 = 30
 NULL_CLASS_IDX = 0
 SliceData = namedtuple(
     'SliceData', ['fisher_vectors', 'counts', 'nr_descriptors', 'begin_frames',
@@ -119,7 +118,7 @@ def load_data_delta_0(
         # Update the slices count.
         ii += nn
 
-    return fisher_vectors, counts, nr_descs, begin_frames, end_frames
+    return fisher_vectors[:ii], counts[:ii], nr_descs[:ii], begin_frames[:ii], end_frames[:ii]
 
 
 def build_sliding_window_mask(N, nn):
@@ -167,7 +166,7 @@ def aggregate(slice_data, nn, agg_type):
         'no_overlap': {
             'mask_builder': build_slice_agg_mask,
             'begin_frame_idxs': slice(0, N, nn),
-            'end_frame_idxs': slice(0, N, nn),
+            'end_frame_idxs': np.minimum(N - 1, range(nn - 1, N + nn - 1, nn)),
         },
     }
 
@@ -200,7 +199,7 @@ def aggregate(slice_data, nn, agg_type):
 
 @timer
 def exact_sliding_window(
-    slice_data, clf, scalers, deltas, sqrt_type='', l2_norm_type=''):
+    slice_data, clf, scalers, stride, deltas, sqrt_type='', l2_norm_type=''):
 
     results = [] 
     weights, bias = clf
@@ -208,7 +207,7 @@ def exact_sliding_window(
     for delta in deltas:
 
         # Aggregate data into bigger slices.
-        nr_agg = delta / DELTA_0
+        nr_agg = delta / stride
         agg_data = aggregate(slice_data, nr_agg, 'overlap')
 
         # Normalize aggregated data.
@@ -234,7 +233,7 @@ def exact_sliding_window(
 
 @timer
 def approx_sliding_window(
-    slice_data, clf, scalers, deltas, visual_word_mask,
+    slice_data, clf, scalers, stride, deltas, visual_word_mask,
     use_integral_values=True):
 
     def integral(X):
@@ -275,7 +274,7 @@ def approx_sliding_window(
     for delta in deltas:
 
         # Build mask.
-        nn = delta / DELTA_0
+        nn = delta / stride
         mask = build_mask(N, nn)
 
         # Approximated predictions.
@@ -342,12 +341,14 @@ def evaluation(algo_type, src_cfg, class_idx, stride, deltas, verbose=0):
     eval.fit(tr_kernel, binary_labels)
 
     te_outfile = '/scratch2/clear/oneata/tmp/joblib/%s_cls%d_test.dat' % (src_cfg, class_idx)
-    te_slice_data = SliceData(*load_data_delta_0(dataset, MOVIE, class_idx, outfile=te_outfile))
+    te_slice_data = SliceData(*load_data_delta_0(
+        dataset, MOVIE, class_idx, delta_0=CFG[src_cfg]['chunk_size'],
+        outfile=te_outfile))
     agg_slice_data = aggregate(te_slice_data, te_nr_agg, 'no_overlap')
 
     clf = compute_weights(eval.get_classifier(), class_tr_video_data)
     results = ALGO_PARAMS[algo_type]['sliding_window'](
-        agg_slice_data, clf, tr_stds, deltas,
+        agg_slice_data, clf, tr_stds, stride, deltas,
         **ALGO_PARAMS[algo_type]['sliding_window_params'])
     
     class_name = dataset.IDX2CLS[class_idx]
