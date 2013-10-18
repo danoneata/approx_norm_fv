@@ -205,8 +205,7 @@ def builg_aggregation_mask_and_limits(
 def aggregate(slice_data, delta, stride, agg_type):
     """Aggregates slices of data into `N` slices."""
 
-    fisher_vectors = slice_data.fisher_vectors
-    N = fisher_vectors.shape[0]
+    N = slice_data.fisher_vectors.shape[0]
 
     # Build mask for aggregation.
     sparse_mask, begin_frame_idxs, end_frame_idxs = builg_aggregation_mask_and_limits(
@@ -214,7 +213,7 @@ def aggregate(slice_data, delta, stride, agg_type):
 
     # Scale by number of descriptors and sum.
     agg_fisher_vectors = sum_and_scale_by(
-        fisher_vectors, slice_data.nr_descriptors, mask=sparse_mask)
+        slice_data.fisher_vectors, slice_data.nr_descriptors, mask=sparse_mask)
     agg_fisher_vectors[np.isnan(agg_fisher_vectors)] = 0
 
     # Sum counts.
