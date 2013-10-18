@@ -262,11 +262,14 @@ def exact_sliding_window(
             agg_fisher_vectors = L2_normalize(agg_fisher_vectors)
 
         nan_idxs = np.isnan(agg_fisher_vectors)
-        agg_fisher_vectors[nan_idxs] = 0
 
         # Predict with the linear classifier.
         scores = predict(agg_fisher_vectors, weights, bias)
-        results += zip(agg_data.begin_frames, agg_data.end_frames, scores)
+        nan_idxs = np.isnan(scores)
+        results += zip(
+            agg_data.begin_frames[~nan_idxs],
+            agg_data.end_frames[~nan_idxs],
+            scores[~nan_idxs])
 
     return results
 
