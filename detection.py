@@ -218,7 +218,8 @@ def aggregate(slice_data, delta, stride, agg_type):
     agg_fisher_vectors[np.isnan(agg_fisher_vectors)] = 0
 
     # Sum counts.
-    agg_counts = sum_by(slice_data.counts, mask=sparse_mask)
+    agg_counts = sum_and_scale_by(
+        slice_data.counts, slice_data.nr_descriptors, mask=sparse_mask)
     agg_counts[np.isnan(agg_counts)] = 0
 
     # Sum number of descriptors.
