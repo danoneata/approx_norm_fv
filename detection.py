@@ -54,11 +54,6 @@ SliceData = namedtuple(
                   'end_frames'])
 
 
-def in_intervals(start, end, intervals):
-    # Check if the interval given by (start, end) is included in intervals.
-    return np.any([low <= start and end <= high for low, high in intervals])
-
-
 def timer(func):
     import time
     def timed_func(*args, **kwargs):
@@ -71,14 +66,15 @@ def timer(func):
 
 @my_cacher('np', 'np', 'np', 'np', 'np')
 def load_data_delta_0(
-    dataset, movie, class_idx, outfile=None, delta_0=30, verbose=0):
+    dataset, movie, part, class_idx, outfile=None, delta_0=30, verbose=0):
     """ Loads Fisher vectors for the test data for detection datasets. """
 
     D = 64
     K = dataset.VOC_SIZE
-    class_limits = dataset.CLASS_LIMITS[movie][dataset.IDX2CLS[class_idx]]
+    class_name = dataset.IDX2CLS[class_idx]
+    class_limits = dataset.CLASS_LIMITS[movie][class_name][part]
 
-    nr_frames = sum(ef - bf for bf, ef in class_limits) + 1
+    nr_frames = class_limits[1] - class_limits[0] + 1
     N = nr_frames / delta_0 + 1
     FV_LEN = 2 * D * K
 
@@ -98,7 +94,7 @@ def load_data_delta_0(
 
         if verbose: sys.stdout.write("%5d %30s\r" % (jj, str(sample)))
 
-        if not in_intervals(sample.bf, sample.ef, class_limits):
+        if sample.bf < class_limits[0] or class_limits[1] < sample.ef:
             continue
 
         # Read sufficient statistics and associated information.
@@ -420,18 +416,23 @@ def evaluation(
 
     eval = Evaluation(CFG[src_cfg]['eval_name'], **CFG[src_cfg]['eval_params'])
     eval.fit(tr_kernel, binary_labels)
-
-    te_outfile = '/scratch2/clear/oneata/tmp/joblib/%s_cls%d_test.dat' % (src_cfg, class_idx)
-    te_slice_data = SliceData(*load_data_delta_0(
-        dataset, MOVIE, class_idx, delta_0=chunk_size, outfile=te_outfile))
-    agg_slice_data = aggregate(te_slice_data, stride, chunk_size, 'no_overlap')
-
     clf = compute_weights(eval.get_classifier(), class_tr_video_data)
-    results = ALGO_PARAMS[algo_type]['sliding_window'](
-        agg_slice_data, clf, tr_stds, stride, deltas, containing=containing,
-        **ALGO_PARAMS[algo_type]['sliding_window_params'])
 
+    results = []
     class_name = dataset.IDX2CLS[class_idx]
+    for part in xrange(len(dataset.CLASS_LIMITS[MOVIE][class_name])):
+        te_outfile = (
+            '/scratch2/clear/oneata/tmp/joblib/%s_cls%d_part%d_test.dat' %
+            (src_cfg, class_idx, part))
+        te_slice_data = SliceData(*load_data_delta_0(
+            dataset, MOVIE, part, class_idx, delta_0=chunk_size,
+            outfile=te_outfile))
+        agg_slice_data = aggregate(te_slice_data, stride, chunk_size, 'no_overlap')
+
+        results += ALGO_PARAMS[algo_type]['sliding_window'](
+            agg_slice_data, clf, tr_stds, stride, deltas, containing=containing,
+            **ALGO_PARAMS[algo_type]['sliding_window_params'])
+
     gt_path = os.path.join(dataset.FL_DIR, 'keyframes_test_%s.list' % class_name)
     adrien_results = [
         (SampID(SAMPID % (MOVIE, bf, ef)), score) for bf, ef, score in results]
