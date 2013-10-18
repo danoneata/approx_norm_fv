@@ -238,16 +238,19 @@ def aggregate(slice_data, delta, stride, agg_type):
 
 @timer
 def exact_sliding_window(
-    slice_data, clf, scalers, stride, deltas, sqrt_type='', l2_norm_type=''):
+    slice_data, clf, scalers, stride, deltas, containing, sqrt_type='',
+    l2_norm_type=''):
 
     results = []
     weights, bias = clf
+
+    agg_type = 'overlap' if not containing else 'overlap_containing'
 
     for delta in deltas:
 
         # Aggregate data into bigger slices.
         nr_agg = delta / stride
-        agg_data = aggregate(slice_data, delta, stride, 'overlap_containing')
+        agg_data = aggregate(slice_data, delta, stride, agg_type)
         agg_fisher_vectors = agg_data.fisher_vectors
 
         # Normalize aggregated data.
@@ -276,7 +279,7 @@ def exact_sliding_window(
 @timer
 def approx_sliding_window(
     slice_data, clf, scalers, stride, deltas, visual_word_mask,
-    use_integral_values=True):
+    containing, use_integral_values=True):
 
     def integral(X):
         return np.vstack((
@@ -312,13 +315,13 @@ def approx_sliding_window(
         build_mask = build_sliding_window_mask
 
     N = fisher_vectors.shape[0]
+    agg_type = 'overlap' if not containing else 'overlap_containing'
 
     for delta in deltas:
 
         # Build mask.
         mask, begin_frame_idxs, end_frame_idxs = builg_aggregation_mask_and_limits(
-            'overlap_containing', delta, stride, N,
-            integral=use_integral_values)
+            agg_type, delta, stride, N, integral=use_integral_values)
 
         # Approximated predictions.
         scores = approximate_video_scores(
@@ -348,8 +351,8 @@ def save_results(dataset, class_idx, adrien_results, deltas=None):
 
 
 def evaluation(
-    algo_type, src_cfg, class_idx, stride, deltas, do_save_results=False,
-    verbose=0):
+    algo_type, src_cfg, class_idx, stride, deltas, containing,
+    do_save_results=False, verbose=0):
 
     dataset = Dataset(CFG[src_cfg]['dataset_name'], **CFG[src_cfg]['dataset_params'])
     D, K = 64, dataset.VOC_SIZE
@@ -425,7 +428,7 @@ def evaluation(
 
     clf = compute_weights(eval.get_classifier(), class_tr_video_data)
     results = ALGO_PARAMS[algo_type]['sliding_window'](
-        agg_slice_data, clf, tr_stds, stride, deltas,
+        agg_slice_data, clf, tr_stds, stride, deltas, containing=containing,
         **ALGO_PARAMS[algo_type]['sliding_window_params'])
 
     class_name = dataset.IDX2CLS[class_idx]
@@ -451,6 +454,12 @@ def main():
         '-a', '--algorithm', required=True, choices=('none', 'approx', 'exact'),
         help="specifies the type of normalizations.")
     parser.add_argument(
+        '--containing', action='store_true', default=False,
+        help=("considers the FVs corresponding to the dense trajectories that"
+              "are completely contained in a given window; otherwise "
+              "considers the FVs corresponding to the dense trajectories that "
+              "start in the given window."))
+    parser.add_argument(
         '--class_idx', default=1, type=int,
         help="index of the class to evaluate.")
     parser.add_argument('-S', '--stride', type=int, help="window displacement step size.")
@@ -473,7 +482,8 @@ def main():
 
     evaluation(
         args.algorithm, args.dataset, args.class_idx, args.stride, deltas,
-        do_save_results=args.save_results, verbose=args.verbose)
+        containing=args.containing, do_save_results=args.save_results,
+        verbose=args.verbose)
 
 
 if __name__ == '__main__':
