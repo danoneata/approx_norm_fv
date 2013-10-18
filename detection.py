@@ -1,5 +1,7 @@
 import argparse
 from collections import namedtuple
+import cPickle
+from itertools import groupby
 import numpy as np
 import pdb
 import os
@@ -323,14 +325,28 @@ def approx_sliding_window(
 
         assert len(scores) == len(agg_begin_frames) == len(agg_end_frames)
 
-        # TODO Change this -- it's horrible style and maybe incorrect!
-        scores[np.isnan(scores)] = -10000
-        results += zip(agg_begin_frames, agg_end_frames, scores)
+        nan_idxs = np.isnan(scores)
+        results += zip(
+            agg_begin_frames[~nan_idxs],
+            agg_end_frames[~nan_idxs],
+            scores[~nan_idxs])
 
     return results
 
 
-def evaluation(algo_type, src_cfg, class_idx, stride, deltas, verbose=0):
+def save_results(dataset, class_idx, adrien_results, deltas=None):
+    res_fn = os.path.join(dataset.SSTATS_DIR, "class_%d_%d_results.pickle")
+    get_duration = lambda xx: xx[0].ef - xx[0].bf
+    for delta, res in groupby(sorted(adrien_results, key=get_duration), key=get_duration):
+        if deltas is not None and delta not in deltas:
+            continue
+        with open(res_fn % (class_idx, delta), 'w') as ff:
+            cPickle.dump(list(res), ff)
+
+
+def evaluation(
+    algo_type, src_cfg, class_idx, stride, deltas, do_save_results=False,
+    verbose=0):
 
     dataset = Dataset(CFG[src_cfg]['dataset_name'], **CFG[src_cfg]['dataset_params'])
     D, K = 64, dataset.VOC_SIZE
@@ -415,6 +431,9 @@ def evaluation(algo_type, src_cfg, class_idx, stride, deltas, verbose=0):
         (SampID(SAMPID % (MOVIE, bf, ef)), score) for bf, ef, score in results]
     ap = get_det_ap(adrien_results, gt_path, 'OV20', 'OV20')
 
+    if do_save_results:
+        save_results(dataset, class_idx, adrien_results, deltas)
+
     print "%10s %.2f" % (class_name, 100 * ap)
 
 
@@ -436,6 +455,9 @@ def main():
     parser.add_argument('--begin', type=int, help="smallest slice length.")
     parser.add_argument('--end', type=int, help="largest slice length.")
     parser.add_argument(
+        '--save_results', action='store_true', default=False,
+        help="dumps results to disk in seperate files for each delta.")
+    parser.add_argument(
         '-v', '--verbose', action='count', help="verbosity level.")
 
     args = parser.parse_args()
@@ -448,7 +470,7 @@ def main():
 
     evaluation(
         args.algorithm, args.dataset, args.class_idx, args.stride, deltas,
-        verbose=args.verbose)
+        do_save_results=args.save_results, verbose=args.verbose)
 
 
 if __name__ == '__main__':
