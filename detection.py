@@ -248,11 +248,11 @@ def exact_sliding_window(
         # Aggregate data into bigger slices.
         nr_agg = delta / stride
         agg_data = aggregate(slice_data, delta, stride, 'overlap_containing')
+        agg_fisher_vectors = agg_data.fisher_vectors
 
         # Normalize aggregated data.
         if scalers[0] is not None:
             agg_fisher_vectors = scalers[0].transform(agg_fisher_vectors)
-        agg_fisher_vectors = agg_data.fisher_vectors
         if sqrt_type != 'none':
             agg_fisher_vectors = power_normalize(agg_fisher_vectors, 0.5)
         if scalers[1] is not None:
