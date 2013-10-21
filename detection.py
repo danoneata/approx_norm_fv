@@ -1,6 +1,7 @@
 import argparse
 from collections import namedtuple
 import cPickle
+from fractions import gcd
 from itertools import groupby
 import numpy as np
 import pdb
@@ -64,6 +65,11 @@ def timer(func):
     return timed_func
 
 
+def mgcd(*args):
+    """Greatest common divisor that accepts multiple arguments."""
+    return mgcd(args[0], mgcd(*args[1:])) if len(args) > 2 else gcd(*args)
+
+
 @my_cacher('np', 'np', 'np', 'np', 'np')
 def load_data_delta_0(
     dataset, movie, part, class_idx, outfile=None, delta_0=30, verbose=0):
@@ -120,29 +126,31 @@ def load_data_delta_0(
     return fisher_vectors[:ii], counts[:ii], nr_descs[:ii], begin_frames[:ii], end_frames[:ii]
 
 
-def build_sliding_window_mask(N, nn):
+def build_sliding_window_mask(N, nn, dd=1):
     """Builds mask to aggregate a vectors [x_1, x_2, ..., x_N] into
     [x_1 + ... + x_n, x_2 + ... + x_{n+1}, ...].
 
     """
-    mask = np.zeros((N - nn + 1, N))
+    M = (N - nn) / dd + 1
+    mask = np.zeros((M, N))
     idxs = [
         map(int, np.hstack(ii))
         for ii in zip(
-            *[[np.ones(nn) * ii, np.arange(nn) + ii]
-              for ii in xrange(N - nn + 1)])]
+            *[[np.ones(nn) * ii, np.arange(nn) + ii * dd]
+              for ii in xrange(M)])]
     mask[idxs] = 1
     return sparse.csr_matrix(mask)
 
 
-def build_integral_sliding_window_mask(N, nn):
+def build_integral_sliding_window_mask(N, nn, dd=1):
     """Builds mask for efficient integral sliding window."""
-    H, W = N - nn + 1, N + 1
+    H = (N - nn) / dd + 1
+    W = N + 1
     mask = np.zeros((H, W))
 
     row_idxs = range(H)
-    neg_idxs = range(H)
-    pos_idxs = [nn + i for i in range(H)]
+    neg_idxs = [ii * dd for ii in range(H)]
+    pos_idxs = [ii * dd + nn for ii in range(H)]
 
     mask[row_idxs, neg_idxs] = -1
     mask[row_idxs, pos_idxs] = +1
@@ -150,62 +158,54 @@ def build_integral_sliding_window_mask(N, nn):
     return sparse.csr_matrix(mask)
 
 
-def builg_aggregation_mask_and_limits(
-    agg_type, delta, stride, n_slices, integral=False):
-    
-    if agg_type == 'overlap':
+class OverlappingSelector:
+    def __init__(self, chunk, stride, containing, integral):
+        self.chunk = chunk
+        self.stride = stride
+        self.integral = integral
+        self.containing = containing
+        self.mask_builder = (
+            build_integral_sliding_window_mask if integral
+            else build_sliding_window_mask)
 
-        n_mask = delta / stride
-        n_frames = delta / stride
+    def get_mask(self, N, window_size):
+        track_len = 15 if self.containing else 0
+        return self.mask_builder(
+            N,
+            (window_size - track_len) / self.chunk,
+            self.stride / self.chunk)
 
-        mask_builder = build_integral_sliding_window_mask if integral else build_sliding_window_mask
-
-        begin_frame_idxs = slice(0, n_slices - n_frames + 1)
-        end_frame_idxs = slice(n_frames - 1, n_slices)
-
-    elif agg_type == 'overlap_containing':
-        # Consider only tracks that are fully contained in the window.
-        assert (delta - TRACK_LEN) % stride == 0
-
-        n_mask = (delta - TRACK_LEN) / stride
-        n_frames = delta / stride
-
-        mask_builder = build_integral_sliding_window_mask if integral else build_sliding_window_mask
-
-        # TODO Fix this. The last frame doesn't have the proper length.
-        begin_frame_idxs = slice(0, n_slices - n_mask + 1)
-        end_frame_idxs = np.minimum(
-            n_slices - 1,
-            range(n_frames - 1, n_slices + n_frames - n_mask))
-
-    elif agg_type == 'no_overlap':
-
-        assert integral == False
-
-        n_mask = delta / stride
-        n_frames = delta / stride
-
-        mask_builder = build_slice_agg_mask
-
-        begin_frame_idxs = slice(0, n_slices, n_frames)
-        end_frame_idxs = np.minimum(
-            n_slices - 1,
-            range(n_frames - 1, n_slices + n_frames - 1, n_frames))
-
-    else:
-        assert False, "Unknown aggregation type %s." % agg_type
-
-    return mask_builder(n_slices, n_mask), begin_frame_idxs, end_frame_idxs
+    def get_frame_idxs(self, N, window_size):
+        extra = 15 / self.chunk if self.containing else 0
+        nr_agg = window_size / self.chunk
+        begin_frame_idxs = np.arange(
+            0,
+            N - nr_agg + extra + 1,
+            self.stride / self.chunk)
+        end_frame_idxs = np.arange(
+            nr_agg - 1,
+            N + extra,
+            self.stride / self.chunk)
+        end_frame_idxs = np.minimum(N - 1, end_frame_idxs)
+        return begin_frame_idxs, end_frame_idxs
 
 
-def aggregate(slice_data, delta, stride, agg_type):
+class NonOverlappingSelector:
+    def __init__(self, nr_agg):
+        self.nr_agg = nr_agg
+
+    def get_mask(self, N):
+        return build_slice_agg_mask(N, self.nr_agg)
+
+    def get_frame_idxs(self, N):
+        begin_frame_idxs = np.arange(0, N, self.nr_agg)
+        end_frame_idxs = np.arange(self.nr_agg - 1, N + self.nr_agg - 1, self.nr_agg)
+        end_frame_idxs = np.minimum(N - 1, end_frame_idxs)
+        return begin_frame_idxs, end_frame_idxs
+
+
+def aggregate(slice_data, sparse_mask, frame_idxs):
     """Aggregates slices of data into `N` slices."""
-
-    N = slice_data.fisher_vectors.shape[0]
-
-    # Build mask for aggregation.
-    sparse_mask, begin_frame_idxs, end_frame_idxs = builg_aggregation_mask_and_limits(
-        agg_type, delta, stride, N)
 
     # Scale by number of descriptors and sum.
     agg_fisher_vectors = sum_and_scale_by(
@@ -221,6 +221,7 @@ def aggregate(slice_data, delta, stride, agg_type):
     agg_nr_descs = sum_by(slice_data.nr_descriptors, mask=sparse_mask)
 
     # Correct begin frames and end frames.
+    begin_frame_idxs, end_frame_idxs = frame_idxs
     agg_begin_frames = slice_data.begin_frames[begin_frame_idxs]
     agg_end_frames = slice_data.end_frames[end_frame_idxs]
 
@@ -234,19 +235,20 @@ def aggregate(slice_data, delta, stride, agg_type):
 
 @timer
 def exact_sliding_window(
-    slice_data, clf, scalers, stride, deltas, containing, sqrt_type='',
-    l2_norm_type=''):
+    slice_data, clf, deltas, selector, scalers, sqrt_type='', l2_norm_type=''):
 
     results = []
     weights, bias = clf
-
-    agg_type = 'overlap' if not containing else 'overlap_containing'
+    N = slice_data.fisher_vectors.shape[0]
 
     for delta in deltas:
 
+        # Build mask.
+        mask = selector.get_mask(N, delta)
+        frame_idxs = selector.get_frame_idxs(N, delta)
+
         # Aggregate data into bigger slices.
-        nr_agg = delta / stride
-        agg_data = aggregate(slice_data, delta, stride, agg_type)
+        agg_data = aggregate(slice_data, mask, frame_idxs)
         agg_fisher_vectors = agg_data.fisher_vectors
 
         # Normalize aggregated data.
@@ -274,9 +276,7 @@ def exact_sliding_window(
 
 @timer
 def approx_sliding_window(
-    slice_data, clf, scalers, stride, deltas, visual_word_mask,
-    containing, use_integral_values=True):
-
+    slice_data, clf, deltas, selector, scalers, visual_word_mask):
     def integral(X):
         return np.vstack((
             np.zeros((1, X.shape[1])),
@@ -301,23 +301,19 @@ def approx_sliding_window(
     slice_vw_l2_norms = visual_word_l2_norm(fisher_vectors, visual_word_mask)
     slice_vw_scores = visual_word_scores(fisher_vectors, weights, bias, visual_word_mask)
 
-    if use_integral_values:
+    if selector.integral:
         slice_vw_counts = integral(slice_vw_counts)
         slice_vw_l2_norms = integral(slice_vw_l2_norms)
         slice_vw_scores = integral(slice_vw_scores)
         nr_descriptors_T = integral(nr_descriptors_T)
-        build_mask = build_integral_sliding_window_mask
-    else:
-        build_mask = build_sliding_window_mask
 
     N = fisher_vectors.shape[0]
-    agg_type = 'overlap' if not containing else 'overlap_containing'
 
     for delta in deltas:
 
         # Build mask.
-        mask, begin_frame_idxs, end_frame_idxs = builg_aggregation_mask_and_limits(
-            agg_type, delta, stride, N, integral=use_integral_values)
+        mask = selector.get_mask(N, delta)
+        begin_frame_idxs, end_frame_idxs = selector.get_frame_idxs(N, delta)
 
         # Approximated predictions.
         scores = approximate_video_scores(
@@ -368,6 +364,9 @@ def evaluation(
                 'l2_norm_type': 'none',
                 'sqrt_type': 'none'
             },
+            'selector_params': {
+                'integral': False,
+            },
         },
         'exact': {
             'train_params': {
@@ -380,6 +379,9 @@ def evaluation(
                 'l2_norm_type': 'exact',
                 'sqrt_type': 'exact'
             },
+            'selector_params': {
+                'integral': False,
+            },
         },
         'approx': {
             'train_params': {
@@ -391,11 +393,15 @@ def evaluation(
             'sliding_window_params': {
                 'visual_word_mask': visual_word_mask
             },
+            'selector_params': {
+                'integral': True,
+            },
         },
     }
 
     chunk_size = CFG[src_cfg]['chunk_size']
-    tr_nr_agg = stride / chunk_size
+    base_chunk_size = mgcd(stride, *deltas)
+    tr_nr_agg = base_chunk_size / chunk_size
 
     # For the old C&C features I have one FV for the entire sample for the
     # train data, so I cannot aggregate.
@@ -420,6 +426,10 @@ def evaluation(
 
     results = []
     class_name = dataset.IDX2CLS[class_idx]
+    non_overlapping_selector = NonOverlappingSelector(base_chunk_size / chunk_size)
+    overlapping_selector = OverlappingSelector(
+        base_chunk_size, stride, containing,
+        **ALGO_PARAMS[algo_type]['selector_params'])
     for part in xrange(len(dataset.CLASS_LIMITS[MOVIE][class_name])):
         te_outfile = (
             '/scratch2/clear/oneata/tmp/joblib/%s_cls%d_part%d_test.dat' %
@@ -427,10 +437,16 @@ def evaluation(
         te_slice_data = SliceData(*load_data_delta_0(
             dataset, MOVIE, part, class_idx, delta_0=chunk_size,
             outfile=te_outfile))
-        agg_slice_data = aggregate(te_slice_data, stride, chunk_size, 'no_overlap')
+
+        # Aggregate data into non-overlapping chunks of size `base_chunk_size`.
+        N = te_slice_data.fisher_vectors.shape[0]
+        agg_slice_data = aggregate(
+            te_slice_data,
+            non_overlapping_selector.get_mask(N),
+            non_overlapping_selector.get_frame_idxs(N))
 
         results += ALGO_PARAMS[algo_type]['sliding_window'](
-            agg_slice_data, clf, tr_stds, stride, deltas, containing=containing,
+            agg_slice_data, clf, deltas, overlapping_selector, tr_stds,
             **ALGO_PARAMS[algo_type]['sliding_window_params'])
 
     gt_path = os.path.join(dataset.FL_DIR, 'keyframes_test_%s.list' % class_name)
@@ -475,11 +491,6 @@ def main():
 
     args = parser.parse_args()
     deltas = range(args.begin, args.end + args.delta, args.delta)
-
-    # Some checking.
-    assert args.stride % CFG[args.dataset]['chunk_size'] == 0
-    for delta in deltas:
-        assert delta % args.stride == 0
 
     evaluation(
         args.algorithm, args.dataset, args.class_idx, args.stride, deltas,
