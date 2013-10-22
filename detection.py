@@ -132,30 +132,36 @@ def build_sliding_window_mask(N, nn, dd=1):
 
     """
     M = (N - nn) / dd + 1
-    mask = np.zeros((M, N))
-    idxs = [
-        map(int, np.hstack(ii))
-        for ii in zip(
-            *[[np.ones(nn) * ii, np.arange(nn) + ii * dd]
-              for ii in xrange(M)])]
-    mask[idxs] = 1
-    return sparse.csr_matrix(mask)
+
+    idxs = np.hstack([
+        [np.ones(nn, dtype=np.int) * ii,
+         np.arange(nn, dtype=np.int) + ii * dd]
+        for ii in xrange(M)])
+
+    values = np.ones(idxs.shape[1])
+
+    return sparse.csr_matrix((values, idxs))
 
 
 def build_integral_sliding_window_mask(N, nn, dd=1):
     """Builds mask for efficient integral sliding window."""
     H = (N - nn) / dd + 1
     W = N + 1
-    mask = np.zeros((H, W))
 
     row_idxs = range(H)
     neg_idxs = [ii * dd for ii in range(H)]
     pos_idxs = [ii * dd + nn for ii in range(H)]
 
-    mask[row_idxs, neg_idxs] = -1
-    mask[row_idxs, pos_idxs] = +1
+    all_row_idxs = np.hstack((row_idxs, row_idxs))
+    all_col_idxs = np.hstack((neg_idxs, pos_idxs))
 
-    return sparse.csr_matrix(mask)
+    idxs = np.vstack((all_row_idxs, all_col_idxs))
+
+    values = np.hstack((
+        - np.ones(len(row_idxs)),
+        + np.ones(len(row_idxs))))
+
+    return sparse.csr_matrix((values, idxs))
 
 
 class OverlappingSelector:
