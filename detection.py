@@ -338,6 +338,129 @@ def approx_sliding_window(
     return results
 
 
+@timer
+def approx_sliding_window_ess(
+    slice_data, clf, deltas, selector, scalers, visual_word_mask):
+
+    import operator
+
+    from ess import Bounds
+    from ess import bounds_in_blacklist
+    from ess import efficient_subwindow_search
+
+    from interval import interval
+
+    def integral(X):
+        return np.vstack((
+            np.zeros((1, X.shape[1])),
+            np.cumsum(X, axis=0)))
+
+    def eval_integral(X, bb):
+        low, high = bb
+        return X[high] - X[low] if high > low else 0
+
+    def only_positive(X):
+        return np.ma.masked_less(X, 0).filled(0)
+
+    def only_negative(X):
+        return np.ma.masked_greater(X, 0).filled(0)
+
+    weights, bias = clf
+
+    # Prepare sliced data.
+    fisher_vectors = slice_data.fisher_vectors
+    for scaler in scalers:
+        if scaler is None:
+            continue
+        fisher_vectors = scaler.transform(fisher_vectors)
+    nr_descriptors_T = slice_data.nr_descriptors[:, np.newaxis]
+
+    # Multiply by the number of descriptors.
+    fisher_vectors = fisher_vectors * nr_descriptors_T / np.sum(nr_descriptors_T)
+    slice_vw_counts = slice_data.counts * nr_descriptors_T / np.sum(nr_descriptors_T)
+
+    #
+    slice_vw_l2_norms = visual_word_l2_norm(fisher_vectors, visual_word_mask)
+    slice_vw_scores = visual_word_scores(fisher_vectors, weights, bias, visual_word_mask)
+
+    assert selector.integral
+
+    slice_vw_counts = integral(slice_vw_counts)
+    slice_vw_l2_norms = integral(slice_vw_l2_norms)
+    pos_slice_vw_scores = integral(only_positive(slice_vw_scores))
+    neg_slice_vw_scores = integral(only_negative(slice_vw_scores))
+    nr_descriptors_T = integral(nr_descriptors_T)
+
+    N = fisher_vectors.shape[0]
+
+    def bounding_function(bounds, banned_intervals):
+
+        union = bounds.get_union()
+        inter = bounds.get_intersection()
+
+        if inter[0] == inter[1] == union[0] == union[1]:
+            return - np.inf
+
+        if inter[1] - inter[0] > max(deltas) / selector.chunk:
+            return - np.inf
+
+        if inter[1] <= inter[0]:
+            return + np.inf
+
+        if bounds_in_blacklist(bounds, banned_intervals):
+            return - np.inf
+
+        score_union = eval_integral(pos_slice_vw_scores, union)
+        score_inter = eval_integral(neg_slice_vw_scores, inter)
+
+        l2_norms_inter = eval_integral(slice_vw_l2_norms, inter)
+
+        counts_union = eval_integral(slice_vw_counts, union)
+        counts_inter = eval_integral(slice_vw_counts, inter)
+
+        bound_sqrt_scores = np.sum(
+            (np.ma.masked_equal(score_union, 0) /
+             np.sqrt(np.ma.masked_equal(counts_inter, 0))).filled(0) +
+            (np.ma.masked_equal(score_inter, 0) /
+             np.sqrt(np.ma.masked_equal(counts_inter, 0))).filled(0))
+
+        bound_approx_l2_norm = np.sum(
+            (np.ma.masked_equal(l2_norms_inter, 0) /
+             np.ma.masked_equal(counts_union, 0)).filled(0))
+
+        if bound_approx_l2_norm == 0:
+            return - np.inf
+
+        return bound_sqrt_scores / np.sqrt(bound_approx_l2_norm)
+
+    banned_intervals = []
+    results = []
+
+    ii = 0
+    low, high = np.array([0, 0]), np.array([N, N])
+    heap = [(0, Bounds(low, high))]
+
+    while True:
+
+        ii += 1
+        covered = reduce(operator.__or__, banned_intervals, interval()) 
+
+        if covered == interval[0, N]:
+            break
+
+        score, idxs, heap = efficient_subwindow_search(
+            lambda bounds: bounding_function(bounds, banned_intervals), heap,
+            blacklist=banned_intervals, verbose=0)
+
+        banned_intervals.append(interval[idxs])
+        results.append((
+            slice_data.begin_frames[np.minimum(N - 1, idxs[0])],
+            slice_data.begin_frames[idxs[1]] if idxs[1] < N else slice_data.end_frames[-1],
+            score))
+
+    return results
+
+ 
 def save_results(dataset, class_idx, adrien_results, deltas=None):
     res_fn = os.path.join(dataset.SSTATS_DIR, "class_%d_%d_results.pickle")
     get_duration = lambda xx: xx[0].ef - xx[0].bf
@@ -396,6 +519,20 @@ def evaluation(
                 'sqrt_type': 'approx'
             },
             'sliding_window': approx_sliding_window,
+            'sliding_window_params': {
+                'visual_word_mask': visual_word_mask
+            },
+            'selector_params': {
+                'integral': True,
+            },
+        },
+        'approx_ess': {
+            'train_params': {
+                'l2_norm_type': 'approx',
+                'empirical_standardizations': [False, True],
+                'sqrt_type': 'approx'
+            },
+            'sliding_window': approx_sliding_window_ess,
             'sliding_window_params': {
                 'visual_word_mask': visual_word_mask
             },
@@ -474,7 +611,8 @@ def main():
         '-d', '--dataset', required=True, choices=('cc', 'cc.stab'),
         help="which dataset.")
     parser.add_argument(
-        '-a', '--algorithm', required=True, choices=('none', 'approx', 'exact'),
+        '-a', '--algorithm', required=True,
+        choices=('none', 'approx', 'approx_ess', 'exact'),
         help="specifies the type of normalizations.")
     parser.add_argument(
         '--containing', action='store_true', default=False,
