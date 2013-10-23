@@ -1,7 +1,9 @@
 import argparse
 import heapq
 import numpy as np
-from pdb import set_trace
+import pdb
+
+from interval import interval
 
 
 MAX_NR_ITER = 10000
@@ -39,16 +41,21 @@ class Bounds:
         return self.high[0], self.low[1]
 
 
-def efficient_subwindow_search(init_bounds, bounding_function, verbose=0):
-
-    heap = [(0, init_bounds)]
+def efficient_subwindow_search(
+    bounding_function, heap, blacklist=[], verbose=0):
 
     for ii in xrange(MAX_NR_ITER):
-        
+
         if verbose > 2:
             print ii, heap
 
         score, bounds = heapq.heappop(heap)
+
+        if verbose > 2:
+            print "Pop", score, bounds
+
+        if bounds_in_blacklist(bounds, blacklist):
+            continue
 
         # Branch...
         split_index = bounds.get_maximum_index()
@@ -66,34 +73,91 @@ def efficient_subwindow_search(init_bounds, bounding_function, verbose=0):
 
         # ... and bound.
         if bounds_i.is_legal():
-            heapq.heappush(heap, (-bounding_function(bounds_i), bounds_i))
+            score = bounding_function(bounds_i)
+            heapq.heappush(heap, (-score, bounds_i))
+
+            if verbose > 2:
+                print "Push", score, bounds_i
 
         if bounds_j.is_legal():
-            heapq.heappush(heap, (-bounding_function(bounds_j), bounds_j))
+            score = bounding_function(bounds_j)
+            heapq.heappush(heap, (-score, bounds_j))
 
-    return - score, (bounds.low + bounds.high) / 2
+            if verbose > 2:
+                print "Push", score, bounds_j
 
+        if verbose > 2:
+            print
 
-def linear_bounding_function(bounds, pos_integral_scores, neg_integral_scores):
-    union_low, union_high = bounds.get_union()
-    inter_low, inter_high = bounds.get_intersection() 
-
-    pos_union = pos_integral_scores[union_high] - pos_integral_scores[union_low]
-    neg_inter = (
-        neg_integral_scores[inter_high] - neg_integral_scores[inter_low]
-        if inter_high > inter_low
-        else 0)
-
-    return pos_union + neg_inter
+    return - score, (bounds.low + bounds.high) / 2, heap
 
 
-def integral(scores):
+def bounds_in_blacklist(bounds, blacklist):
+    union = interval[bounds.get_union()]
+    inter = interval[bounds.get_intersection()]
+    return (
+        any((union in window for window in blacklist)) or
+        any((len((inter & window).extrema) > 1 for window in blacklist)))
+
+
+def integral(X):
+    return np.hstack((0, np.cumsum(X)))
+
+
+def pos_neg_integral(scores):
     """Works only for 1D arrays at the moment, but can be easily extended."""
     scores = np.hstack([[0], scores])  # Padding.
     pos_scores, neg_scores = scores.copy(), scores.copy()
     idxs = scores >= 0
     pos_scores[~idxs], neg_scores[idxs] = 0, 0
     return np.cumsum(pos_scores), np.cumsum(neg_scores)
+
+
+def eval_integral(X, bb):
+    low, high = bb
+    return X[high] - X[low] if high > low else 0
+
+
+def linear_bounding_function_builder(scores):
+
+    pos_integral_scores, neg_integral_scores = pos_neg_integral(scores)
+
+    def linear_bounding_function(bounds):
+        union = bounds.get_union()
+        inter = bounds.get_intersection()
+
+        pos_union = eval_integral(pos_integral_scores, union)
+        neg_inter = eval_integral(neg_integral_scores, inter)
+
+        return pos_union + neg_inter
+
+    return linear_bounding_function
+
+
+def norm_bounding_function_builder(scores):
+
+    pos_integral_scores, neg_integral_scores = pos_neg_integral(scores)
+    norms = integral(scores ** 2)
+
+    def norm_bounding_function(bounds):
+
+        union = bounds.get_union()
+        inter = bounds.get_intersection()
+
+        if inter[0] == inter[1] == union[0] == union[1]:
+            return - np.inf
+
+        if inter[1] <= inter[0]:
+            return np.inf
+
+        pos_union = eval_integral(pos_integral_scores, union)
+        neg_inter = eval_integral(neg_integral_scores, inter)
+
+        bound_norm = eval_integral(norms, inter)
+
+        return (pos_union + neg_inter) / np.sqrt(bound_norm)
+
+    return norm_bounding_function
 
 
 def max_subarray(A):
@@ -105,7 +169,7 @@ def max_subarray(A):
     return max_so_far
 
 
-def test(verbose=0):
+def test(bounding_function_builder, nr_tests, verbose=0):
     """Some simple tests to check that everything is fine."""
     np.random.seed(0)
     TESTS = [
@@ -113,37 +177,48 @@ def test(verbose=0):
         [+2, 1, +3, 4, +1, 2, 1, +5, 4],
         np.random.randn(100)]
 
-    for scores in TESTS:
+    for scores in TESTS[:nr_tests]:
         scores = np.array(scores)
         N = len(scores)
 
-        pos_integral_scores, neg_integral_scores = integral(scores)
-        bounding_function = lambda bounds: linear_bounding_function(
-            bounds, pos_integral_scores, neg_integral_scores)
-
+        bounding_function = bounding_function_builder(scores)
         low, high = np.array([0, 0]), np.array([N, N])
-        score, idxs = efficient_subwindow_search(
-            Bounds(low, high), bounding_function, verbose=verbose)
+
+        heap = [(0, Bounds(low, high))]
+
+        score, idxs, _ = efficient_subwindow_search(
+            bounding_function, heap, verbose=verbose)
 
         if verbose:
             print "Final score:", score
             print "Bounds", idxs
 
-        assert scores[idxs[0]: idxs[1]].sum() == max_subarray(scores)
+        # assert scores[idxs[0]: idxs[1]].sum() == max_subarray(scores)
 
 
 def main():
+    BUILDERS = {
+        'linear': linear_bounding_function_builder,
+        'norm': norm_bounding_function_builder,
+    }
+
     parser = argparse.ArgumentParser(
         description="Efficient sub-window search with branch and bound method.")
 
-    parser.add_argument('--test', action='store_true', help="run tests.")
+    parser.add_argument(
+        '-f', '--bounding_function', choices=BUILDERS.keys(),
+        help="type of the bounding function.")
+    parser.add_argument(
+        '--nr_tests', type=int, default=1, help="number of tests to run.")
     parser.add_argument(
         '-v', '--verbose', action='count', help="verbosity level.")
 
     args = parser.parse_args()
 
-    if args.test:
-        test(verbose=args.verbose)
+    test(
+        BUILDERS[args.bounding_function],
+        nr_tests=args.nr_tests,
+        verbose=args.verbose)
 
 
 if __name__ == "__main__":
