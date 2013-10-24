@@ -16,7 +16,7 @@ from dataset import SampID
 
 from fisher_vectors.evaluation import Evaluation
 from fisher_vectors.model.utils import power_normalize
-from fisher_vectors.model.utils import L2_normalize
+from fisher_vectors.model.utils import compute_L2_normalization
 
 from load_data import approximate_signed_sqrt
 from load_data import load_kernels
@@ -290,11 +290,18 @@ def exact_sliding_window(
             agg_fisher_vectors = power_normalize(agg_fisher_vectors, 0.5)
         if scalers[1] is not None:
             agg_fisher_vectors = scalers[1].transform(agg_fisher_vectors)
-        if l2_norm_type != 'none':
-            agg_fisher_vectors = L2_normalize(agg_fisher_vectors)
+        # More efficient, to apply L2 on the scores than on the FVs.
+        l2_norms = (
+            compute_L2_normalization(agg_fisher_vectors)
+            if l2_norm_type != 'none'
+            else np.ones(len(agg_fisher_vectors)))
 
         # Predict with the linear classifier.
-        scores = predict(agg_fisher_vectors, weights, bias)
+        scores = (
+            - np.dot(agg_fisher_vectors, weights.T).squeeze()
+            / np.sqrt(l2_norms)
+            + bias)
+
         nan_idxs = np.isnan(scores)
         results += zip(
             agg_begin_frames[~nan_idxs],
