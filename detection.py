@@ -375,8 +375,6 @@ def approx_sliding_window_ess(
     from ess import bounds_in_blacklist
     from ess import efficient_subwindow_search
 
-    from interval import interval
-
     def integral(X):
         return np.vstack((
             np.zeros((1, X.shape[1])),
@@ -434,7 +432,7 @@ def approx_sliding_window_ess(
         if inter[1] <= inter[0]:
             return + np.inf
 
-        if bounds_in_blacklist(bounds, banned_intervals):
+        if len(banned_intervals) > 0 and bounds_in_blacklist(bounds, banned_intervals):
             return - np.inf
 
         score_union = eval_integral(pos_slice_vw_scores, union)
@@ -462,6 +460,7 @@ def approx_sliding_window_ess(
 
     banned_intervals = []
     results = []
+    T = slice_data.end_frames[-1] - slice_data.begin_frames[0]
 
     ii = 0
     low, high = np.array([0, 0]), np.array([N, N])
@@ -470,20 +469,21 @@ def approx_sliding_window_ess(
     while True:
 
         ii += 1
-        covered = reduce(operator.__or__, banned_intervals, interval())
-
-        if covered == interval[0, N]:
-            break
 
         score, idxs, heap = efficient_subwindow_search(
             lambda bounds: bounding_function(bounds, banned_intervals), heap,
             blacklist=banned_intervals, verbose=0)
 
-        banned_intervals.append(interval[idxs])
+        banned_intervals.append(idxs)
         results.append((
             slice_data.begin_frames[np.minimum(N - 1, idxs[0])],
             slice_data.begin_frames[idxs[1]] if idxs[1] < N else slice_data.end_frames[-1],
             score))
+
+        covered = np.sum((res[1] - res[0] for res in results))
+
+        if covered >= T - 1:
+            break
 
     return results
 

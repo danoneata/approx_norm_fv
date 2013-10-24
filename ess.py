@@ -3,8 +3,6 @@ import heapq
 import numpy as np
 import pdb
 
-from interval import interval
-
 
 MAX_NR_ITER = 10000
 
@@ -54,7 +52,7 @@ def efficient_subwindow_search(
         if verbose > 2:
             print "Pop", score, bounds
 
-        if bounds_in_blacklist(bounds, blacklist):
+        if len(blacklist) > 0 and bounds_in_blacklist(bounds, blacklist):
             continue
 
         # Branch...
@@ -93,11 +91,19 @@ def efficient_subwindow_search(
 
 
 def bounds_in_blacklist(bounds, blacklist):
-    union = interval[bounds.get_union()]
-    inter = interval[bounds.get_intersection()]
+
+    union = np.sort(bounds.get_union())
+    inter = np.sort(bounds.get_intersection())
+
+    def contains(xx, yy):
+        return yy[0] <= xx[0] and xx[1] <= yy[1]
+
+    def intersects(xx, yy):
+        return min(xx[1], yy[1]) - max(xx[0], yy[0]) > 0
+
     return (
-        any((union in window for window in blacklist)) or
-        any((len((inter & window).extrema) > 1 for window in blacklist)))
+        any(contains(union, window) for window in blacklist) or
+        any(intersects(inter, window) for window in blacklist))
 
 
 def integral(X):
