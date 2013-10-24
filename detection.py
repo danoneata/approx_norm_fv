@@ -239,23 +239,49 @@ def aggregate(slice_data, sparse_mask, frame_idxs):
         agg_end_frames)
 
 
+def integral(X):
+    if X.ndim == 1:
+        return np.hstack((0, np.cumsum(X)))
+    elif X.ndim == 2:
+        return np.vstack((np.zeros((1, X.shape[1])), np.cumsum(X, axis=0)))
+    else:
+        assert False
+
+
 @timer
 def exact_sliding_window(
     slice_data, clf, deltas, selector, scalers, sqrt_type='', l2_norm_type=''):
 
     results = []
     weights, bias = clf
-    N = slice_data.fisher_vectors.shape[0]
+
+    nr_descriptors_T = slice_data.nr_descriptors[:, np.newaxis]
+
+    # Multiply by the number of descriptors.
+    fisher_vectors = slice_data.fisher_vectors * nr_descriptors_T
+    begin_frames, end_frames = slice_data.begin_frames, slice_data.end_frames
+    N = fisher_vectors.shape[0]
+
+    if selector.integral:
+        fisher_vectors = integral(fisher_vectors)
+        nr_descriptors_T = integral(nr_descriptors_T)
 
     for delta in deltas:
 
         # Build mask.
         mask = selector.get_mask(N, delta)
-        frame_idxs = selector.get_frame_idxs(N, delta)
+        begin_frame_idxs, end_frame_idxs = selector.get_frame_idxs(N, delta)
 
         # Aggregate data into bigger slices.
-        agg_data = aggregate(slice_data, mask, frame_idxs)
-        agg_fisher_vectors = agg_data.fisher_vectors
+        agg_fisher_vectors = (
+            sum_by(fisher_vectors, mask) /
+            sum_by(nr_descriptors_T, mask))
+        agg_fisher_vectors[np.isnan(agg_fisher_vectors)] = 0
+
+        agg_begin_frames = begin_frames[begin_frame_idxs]
+        agg_end_frames = end_frames[end_frame_idxs]
+
+        assert len(agg_fisher_vectors) == len(agg_begin_frames) == len(agg_end_frames)
 
         # Normalize aggregated data.
         if scalers[0] is not None:
@@ -267,14 +293,12 @@ def exact_sliding_window(
         if l2_norm_type != 'none':
             agg_fisher_vectors = L2_normalize(agg_fisher_vectors)
 
-        nan_idxs = np.isnan(agg_fisher_vectors)
-
         # Predict with the linear classifier.
         scores = predict(agg_fisher_vectors, weights, bias)
         nan_idxs = np.isnan(scores)
         results += zip(
-            agg_data.begin_frames[~nan_idxs],
-            agg_data.end_frames[~nan_idxs],
+            agg_begin_frames[~nan_idxs],
+            agg_end_frames[~nan_idxs],
             scores[~nan_idxs])
 
     return results
@@ -283,10 +307,6 @@ def exact_sliding_window(
 @timer
 def approx_sliding_window(
     slice_data, clf, deltas, selector, scalers, visual_word_mask):
-    def integral(X):
-        return np.vstack((
-            np.zeros((1, X.shape[1])),
-            np.cumsum(X, axis=0)))
 
     results = []
     weights, bias = clf
@@ -443,7 +463,7 @@ def approx_sliding_window_ess(
     while True:
 
         ii += 1
-        covered = reduce(operator.__or__, banned_intervals, interval()) 
+        covered = reduce(operator.__or__, banned_intervals, interval())
 
         if covered == interval[0, N]:
             break
@@ -460,7 +480,7 @@ def approx_sliding_window_ess(
 
     return results
 
- 
+
 def save_results(dataset, class_idx, adrien_results, deltas=None):
     res_fn = os.path.join(dataset.SSTATS_DIR, "class_%d_%d_results.pickle")
     get_duration = lambda xx: xx[0].ef - xx[0].bf
@@ -472,7 +492,7 @@ def save_results(dataset, class_idx, adrien_results, deltas=None):
 
 
 def evaluation(
-    algo_type, src_cfg, class_idx, stride, deltas, containing,
+    algo_type, src_cfg, class_idx, stride, deltas, no_integral, containing,
     do_save_results=False, verbose=0):
 
     dataset = Dataset(CFG[src_cfg]['dataset_name'], **CFG[src_cfg]['dataset_params'])
@@ -493,9 +513,6 @@ def evaluation(
                 'l2_norm_type': 'none',
                 'sqrt_type': 'none'
             },
-            'selector_params': {
-                'integral': False,
-            },
         },
         'exact': {
             'train_params': {
@@ -508,9 +525,6 @@ def evaluation(
                 'l2_norm_type': 'exact',
                 'sqrt_type': 'exact'
             },
-            'selector_params': {
-                'integral': False,
-            },
         },
         'approx': {
             'train_params': {
@@ -522,9 +536,6 @@ def evaluation(
             'sliding_window_params': {
                 'visual_word_mask': visual_word_mask
             },
-            'selector_params': {
-                'integral': True,
-            },
         },
         'approx_ess': {
             'train_params': {
@@ -535,9 +546,6 @@ def evaluation(
             'sliding_window': approx_sliding_window_ess,
             'sliding_window_params': {
                 'visual_word_mask': visual_word_mask
-            },
-            'selector_params': {
-                'integral': True,
             },
         },
     }
@@ -572,7 +580,7 @@ def evaluation(
     non_overlapping_selector = NonOverlappingSelector(base_chunk_size / chunk_size)
     overlapping_selector = OverlappingSelector(
         base_chunk_size, stride, containing,
-        **ALGO_PARAMS[algo_type]['selector_params'])
+        integral=(not no_integral))
     for part in xrange(len(dataset.CLASS_LIMITS[MOVIE][class_name])):
         te_outfile = (
             '/scratch2/clear/oneata/tmp/joblib/%s_cls%d_part%d_test.dat' %
@@ -623,6 +631,9 @@ def main():
     parser.add_argument(
         '--class_idx', default=1, type=int,
         help="index of the class to evaluate.")
+    parser.add_argument(
+        '--no_integral', action='store_true', default=False,
+        help="does not use integral quantities for aggregation.")
     parser.add_argument('-S', '--stride', type=int, help="window displacement step size.")
     parser.add_argument('-D', '--delta', type=int, help="base slice length.")
     parser.add_argument('--begin', type=int, help="smallest slice length.")
@@ -638,8 +649,8 @@ def main():
 
     evaluation(
         args.algorithm, args.dataset, args.class_idx, args.stride, deltas,
-        containing=args.containing, do_save_results=args.save_results,
-        verbose=args.verbose)
+        no_integral=args.no_integral, containing=args.containing,
+        do_save_results=args.save_results, verbose=args.verbose)
 
 
 if __name__ == '__main__':
