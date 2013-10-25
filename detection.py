@@ -372,8 +372,9 @@ def approx_sliding_window_ess(
     import operator
 
     from ess import Bounds
-    from ess import bounds_in_blacklist
     from ess import efficient_subwindow_search
+
+    from utils_ess import in_blacklist
 
     def integral(X):
         return np.vstack((
@@ -432,29 +433,30 @@ def approx_sliding_window_ess(
         if inter[1] <= inter[0]:
             return + np.inf
 
-        if len(banned_intervals) > 0 and bounds_in_blacklist(bounds, banned_intervals):
+        l2_norms_inter = eval_integral(slice_vw_l2_norms, inter)
+        if np.all(l2_norms_inter == 0):
+            return - np.inf
+
+        if len(banned_intervals) > 0 and in_blacklist(bounds.low, bounds.high, banned_intervals):
             return - np.inf
 
         score_union = eval_integral(pos_slice_vw_scores, union)
         score_inter = eval_integral(neg_slice_vw_scores, inter)
 
-        l2_norms_inter = eval_integral(slice_vw_l2_norms, inter)
-
         counts_union = eval_integral(slice_vw_counts, union)
         counts_inter = eval_integral(slice_vw_counts, inter)
 
-        bound_sqrt_scores = np.sum(
-            (np.ma.masked_equal(score_union, 0) /
-             np.sqrt(np.ma.masked_equal(counts_inter, 0))).filled(0) +
-            (np.ma.masked_equal(score_inter, 0) /
-             np.sqrt(np.ma.masked_equal(counts_inter, 0))).filled(0))
+        idxs_inter = counts_inter == 0
+        idxs_union = counts_union == 0
 
-        bound_approx_l2_norm = np.sum(
-            (np.ma.masked_equal(l2_norms_inter, 0) /
-             np.ma.masked_equal(counts_union, 0)).filled(0))
+        bound_sqrt_scores = np.sum(((
+            np.ma.array(score_union, mask=idxs_union) +
+            np.ma.array(score_inter, mask=idxs_inter)) /
+            np.sqrt(np.ma.array(counts_inter, mask=idxs_inter))).filled(0))
 
-        if bound_approx_l2_norm == 0:
-            return - np.inf
+        bound_approx_l2_norm = np.sum((
+            np.ma.array(l2_norms_inter, mask=idxs_inter) /
+            np.ma.array(counts_union, mask=idxs_union)).filled(0))
 
         return bound_sqrt_scores / np.sqrt(bound_approx_l2_norm)
 
