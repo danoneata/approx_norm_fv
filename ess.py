@@ -42,12 +42,17 @@ class Bounds:
 def efficient_subwindow_search(
     bounding_function, heap, blacklist=[], verbose=0):
 
+    nr_inf_bounds = 0
+
     for ii in xrange(MAX_NR_ITER):
 
         if verbose > 2:
             print ii, heap
 
         score, bounds = heapq.heappop(heap)
+
+        if score == - np.inf:
+            nr_inf_bounds += 1
 
         if verbose > 2:
             print "Pop", score, bounds
@@ -86,6 +91,10 @@ def efficient_subwindow_search(
 
         if verbose > 2:
             print
+
+    if verbose > 1:
+        print "Number of `Inf` bounds", nr_inf_bounds
+        print "Evaluated %d states." % ii
 
     return - score, (bounds.low + bounds.high) / 2, heap
 

@@ -406,6 +406,9 @@ def approx_sliding_window_ess(
 
     assert selector.integral
 
+    slice_vw_l2_norms_no_integral = slice_vw_l2_norms
+    slice_vw_scores_no_integral = slice_vw_scores
+
     slice_vw_counts = integral(slice_vw_counts)
     slice_vw_l2_norms = integral(slice_vw_l2_norms)
     pos_slice_vw_scores = integral(only_positive(slice_vw_scores))
@@ -419,14 +422,25 @@ def approx_sliding_window_ess(
         union = bounds.get_union()
         inter = bounds.get_intersection()
 
-        if inter[0] == inter[1] == union[0] == union[1]:
+        if inter[0] == inter[1] == union[0] == union[1] or union[0] == union[1]:
             return - np.inf
 
         if inter[1] - inter[0] > max(deltas) / selector.chunk:
             return - np.inf
 
         if inter[1] <= inter[0]:
-            return + np.inf
+            counts_union = eval_integral(slice_vw_counts, union)
+            idxs_union = counts_union == 0
+            if np.all(idxs_union):
+                return + np.inf
+            l2_norms_union = np.min(slice_vw_l2_norms_no_integral[union[0]:union[1]], axis=0)
+            scores_union = np.max(slice_vw_scores_no_integral[union[0]:union[1]], axis=0)
+            return ((
+                np.ma.array(scores_union, mask=idxs_union) /
+                np.ma.array(np.sqrt(counts_union), mask=idxs_union)).filled(0).sum() /
+                np.sqrt((
+                    np.ma.array(l2_norms_union, mask=idxs_union) /
+                    np.ma.array(counts_union, mask=idxs_union)).filled(0).sum()))
 
         l2_norms_inter = eval_integral(slice_vw_l2_norms, inter)
         if np.all(l2_norms_inter == 0):
@@ -460,6 +474,7 @@ def approx_sliding_window_ess(
     T = slice_data.end_frames[-1] - slice_data.begin_frames[0]
 
     ii = 0
+    covered = 0
     heap = [(0, Bounds(np.array((0, 0)), np.array((N, N))))]
 
     while True:
@@ -476,9 +491,9 @@ def approx_sliding_window_ess(
             slice_data.begin_frames[idxs[1]] if idxs[1] < N else slice_data.end_frames[-1],
             score))
 
-        covered = np.sum((res[1] - res[0] for res in results))
+        covered += idxs[1] - idxs[0]
 
-        if covered >= T - 1:
+        if covered >= N or score == - np.inf:
             break
 
     return results
