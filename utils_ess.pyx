@@ -4,6 +4,16 @@ import heapq
 import numpy as np
 cimport numpy as np
 
+
+# TODO
+# [ ] Use with `for` loops in _eval_integral and maybe `inline`.
+# [ ] Change from `tuple` to `Interval` where possible.
+
+
+cdef extern from "math.h":
+    double sqrt(double)
+
+
 # Data structures.
 cdef struct Interval:
    int elem0 
@@ -223,9 +233,8 @@ cdef class ApproxNormsBoundingFunction(Function):
 
     cpdef double evaluate(self, Bounds bounds) except *:
 
-        cdef tuple uu
-        cdef tuple ii
-        cdef np.ndarray[np.uint8_t, ndim=1, cast=True] idxs_inter, idxs_union
+        cdef unsigned int kk
+        cdef tuple uu, ii
         cdef np.ndarray[np.float64_t, ndim=1] score_union, score_inter, counts_union, counts_inter, l2_norms_inter
         cdef double bound_sqrt_scores, bound_approx_l2_norm
 
@@ -254,19 +263,16 @@ cdef class ApproxNormsBoundingFunction(Function):
         counts_union = self._eval_integral(self.slice_vw_counts, uu)
         counts_inter = self._eval_integral(self.slice_vw_counts, ii)
 
-        idxs_inter = counts_inter == 0
-        idxs_union = counts_union == 0
+        bound_sqrt_scores = 0
+        bound_approx_l2_norm = 0
 
-        bound_sqrt_scores = np.sum(((
-            np.ma.array(score_union, mask=idxs_union) +
-            np.ma.array(score_inter, mask=idxs_inter)) /
-            np.sqrt(np.ma.array(counts_inter, mask=idxs_inter))).filled(0))
+        for kk in xrange(score_union.shape[0]):
+            if counts_inter[kk] == 0 or counts_union[kk] == 0:
+                continue
+            bound_sqrt_scores += (score_union[kk] + score_inter[kk]) / sqrt(counts_inter[kk])
+            bound_approx_l2_norm += l2_norms_inter[kk] / counts_union[kk]
 
-        bound_approx_l2_norm = np.sum((
-            np.ma.array(l2_norms_inter, mask=idxs_inter) /
-            np.ma.array(counts_union, mask=idxs_union)).filled(0))
-
-        return bound_sqrt_scores / np.sqrt(bound_approx_l2_norm)
+        return bound_sqrt_scores / sqrt(bound_approx_l2_norm)
 
     cpdef np.ndarray _eval_integral(
         self,
