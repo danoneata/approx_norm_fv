@@ -536,6 +536,9 @@ def cy_approx_sliding_window_ess(
 
     assert selector.integral
 
+    slice_vw_l2_norms_no_integral = slice_vw_l2_norms
+    slice_vw_scores_no_integral = slice_vw_scores
+
     slice_vw_counts = integral(slice_vw_counts)
     slice_vw_l2_norms = integral(slice_vw_l2_norms)
     pos_slice_vw_scores = integral(only_positive(slice_vw_scores))
@@ -553,6 +556,7 @@ def cy_approx_sliding_window_ess(
     heap = [(0, b_init_bounds((0, 0), (N, N)))]
 
     bounding_function = ApproxNormsBoundingFunction(
+        slice_vw_scores_no_integral, slice_vw_l2_norms_no_integral,
         pos_slice_vw_scores, neg_slice_vw_scores, slice_vw_counts,
         slice_vw_l2_norms, max_window=max(deltas) / selector.chunk)
 

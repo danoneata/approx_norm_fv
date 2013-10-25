@@ -213,6 +213,8 @@ cdef class LinearBoundingFunction(Function):
 
 cdef class ApproxNormsBoundingFunction(Function):
 
+    cdef np.ndarray slice_vw_scores_no_integral,
+    cdef np.ndarray slice_vw_l2_norms_no_integral,
     cdef np.ndarray pos_slice_vw_scores
     cdef np.ndarray neg_slice_vw_scores
     cdef np.ndarray slice_vw_counts
@@ -222,12 +224,16 @@ cdef class ApproxNormsBoundingFunction(Function):
 
     def __init__(
         self,
+        np.ndarray[np.float64_t, ndim=2] slice_vw_scores_no_integral,
+        np.ndarray[np.float64_t, ndim=2] slice_vw_l2_norms_no_integral,
         np.ndarray[np.float64_t, ndim=2] pos_slice_vw_scores,
         np.ndarray[np.float64_t, ndim=2] neg_slice_vw_scores,
         np.ndarray[np.float64_t, ndim=2] slice_vw_counts,
         np.ndarray[np.float64_t, ndim=2] slice_vw_l2_norms,
         int max_window):
 
+        self.slice_vw_scores_no_integral = slice_vw_scores_no_integral
+        self.slice_vw_l2_norms_no_integral = slice_vw_l2_norms_no_integral
         self.pos_slice_vw_scores = pos_slice_vw_scores 
         self.neg_slice_vw_scores = neg_slice_vw_scores 
         self.slice_vw_counts = slice_vw_counts
@@ -245,17 +251,32 @@ cdef class ApproxNormsBoundingFunction(Function):
         cdef np.ndarray[np.float64_t, ndim=1] score_union, score_inter, counts_union, counts_inter, l2_norms_inter
         cdef double bound_sqrt_scores, bound_approx_l2_norm
 
+        bound_sqrt_scores = 0
+        bound_approx_l2_norm = 0
+
         uu = b_get_union(bounds)
         ii = b_get_intersection(bounds)
 
-        if ii[0] == ii[1] == uu[0] == uu[1]:
+        if ii[0] == ii[1] == uu[0] == uu[1] or uu[0] == uu[1]:
             return - np.inf
 
         if ii[1] - ii[0] > self.max_window:
             return - np.inf
 
+        # Empty intersection.
         if ii[1] <= ii[0]:
-            return + np.inf
+
+            counts_union = self._eval_integral(self.slice_vw_counts, uu)
+            l2_norms_union = np.min(self.slice_vw_l2_norms_no_integral[uu[0]: uu[1]], axis=0)
+            score_union = np.max(self.slice_vw_scores_no_integral[uu[0]: uu[1]], axis=0)
+
+            for kk in xrange(score_union.shape[0]):
+                if counts_union[kk] == 0:
+                    continue
+                bound_sqrt_scores += score_union[kk] / sqrt(counts_union[kk])
+                bound_approx_l2_norm += l2_norms_union[kk] / counts_union[kk]
+
+            return bound_sqrt_scores / np.sqrt(bound_approx_l2_norm) if bound_approx_l2_norm != 0 else + np.inf
 
         l2_norms_inter = self._eval_integral(self.slice_vw_l2_norms, ii)
         if np.all(l2_norms_inter == 0):
@@ -269,9 +290,6 @@ cdef class ApproxNormsBoundingFunction(Function):
 
         counts_union = self._eval_integral(self.slice_vw_counts, uu)
         counts_inter = self._eval_integral(self.slice_vw_counts, ii)
-
-        bound_sqrt_scores = 0
-        bound_approx_l2_norm = 0
 
         for kk in xrange(score_union.shape[0]):
             if counts_inter[kk] == 0 or counts_union[kk] == 0:
