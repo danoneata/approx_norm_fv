@@ -3,8 +3,6 @@ import heapq
 import numpy as np
 import pdb
 
-from utils_ess import in_blacklist
-
 
 MAX_NR_ITER = 10000
 
@@ -54,7 +52,7 @@ def efficient_subwindow_search(
         if verbose > 2:
             print "Pop", score, bounds
 
-        if len(blacklist) > 0 and in_blacklist(bounds.low, bounds.high, blacklist):
+        if len(blacklist) > 0 and bounds_in_blacklist(bounds, blacklist):
             continue
 
         # Branch...

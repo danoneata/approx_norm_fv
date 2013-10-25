@@ -43,9 +43,10 @@ from ssqrt_l2_approx import LOAD_SAMPLE_DATA_PARAMS
 
 
 # TODO Things to improve
-# [ ] Check if frames are contiguous. If not treat them specifically.
-# [ ] Build mask with Cython.
-# [ ] Mask with 1, -1 and integral quantities.
+# [x] Check if frames are contiguous. If not treat them specifically.
+# [x] Mask with 1, -1 and integral quantities.
+# [ ] Write fast ESS for approximate norms in Cython.
+# [ ] Remove duplicate code from `approx_ess` and `cy_approx_ess`.
 
 
 TRACK_LEN = 15
@@ -248,6 +249,14 @@ def integral(X):
         assert False
 
 
+def only_positive(X):
+    return np.ma.masked_less(X, 0).filled(0)
+
+
+def only_negative(X):
+    return np.ma.masked_greater(X, 0).filled(0)
+
+
 @timer
 def exact_sliding_window(
     slice_data, clf, deltas, selector, scalers, sqrt_type='', l2_norm_type=''):
@@ -369,27 +378,13 @@ def approx_sliding_window(
 def approx_sliding_window_ess(
     slice_data, clf, deltas, selector, scalers, visual_word_mask):
 
-    import operator
-
     from ess import Bounds
     from ess import efficient_subwindow_search
-
-    from utils_ess import in_blacklist
-
-    def integral(X):
-        return np.vstack((
-            np.zeros((1, X.shape[1])),
-            np.cumsum(X, axis=0)))
+    from ess import bounds_in_blacklist
 
     def eval_integral(X, bb):
         low, high = bb
         return X[high] - X[low] if high > low else 0
-
-    def only_positive(X):
-        return np.ma.masked_less(X, 0).filled(0)
-
-    def only_negative(X):
-        return np.ma.masked_greater(X, 0).filled(0)
 
     weights, bias = clf
 
@@ -437,7 +432,7 @@ def approx_sliding_window_ess(
         if np.all(l2_norms_inter == 0):
             return - np.inf
 
-        if len(banned_intervals) > 0 and in_blacklist(bounds.low, bounds.high, banned_intervals):
+        if len(banned_intervals) > 0 and bounds_in_blacklist(bounds, banned_intervals):
             return - np.inf
 
         score_union = eval_integral(pos_slice_vw_scores, union)
@@ -465,16 +460,92 @@ def approx_sliding_window_ess(
     T = slice_data.end_frames[-1] - slice_data.begin_frames[0]
 
     ii = 0
-    low, high = np.array([0, 0]), np.array([N, N])
-    heap = [(0, Bounds(low, high))]
+    heap = [(0, Bounds(np.array((0, 0)), np.array((N, N))))]
 
     while True:
 
         ii += 1
 
         score, idxs, heap = efficient_subwindow_search(
-            lambda bounds: bounding_function(bounds, banned_intervals), heap,
-            blacklist=banned_intervals, verbose=0)
+            lambda bounds: bounding_function(bounds, banned_intervals),
+            heap, blacklist=banned_intervals, verbose=0)
+
+        banned_intervals.append(idxs)
+        results.append((
+            slice_data.begin_frames[np.minimum(N - 1, idxs[0])],
+            slice_data.begin_frames[idxs[1]] if idxs[1] < N else slice_data.end_frames[-1],
+            score))
+
+        covered = np.sum((res[1] - res[0] for res in results))
+
+        if covered >= T - 1:
+            break
+
+    return results
+
+
+@timer
+def cy_approx_sliding_window_ess(
+    slice_data, clf, deltas, selector, scalers, visual_word_mask):
+
+    import operator
+
+    from ess import Bounds
+    from ess import efficient_subwindow_search
+
+    from utils_ess import ApproxNormsBoundingFunction
+    from utils_ess import b_get_union
+    from utils_ess import b_get_intersection
+    from utils_ess import b_in_blacklist
+    from utils_ess import b_init_bounds
+    from utils_ess import efficient_subwindow_search as cy_efficient_subwindow_search
+
+    weights, bias = clf
+
+    # Prepare sliced data.
+    fisher_vectors = slice_data.fisher_vectors
+    for scaler in scalers:
+        if scaler is None:
+            continue
+        fisher_vectors = scaler.transform(fisher_vectors)
+    nr_descriptors_T = slice_data.nr_descriptors[:, np.newaxis]
+
+    # Multiply by the number of descriptors.
+    fisher_vectors = fisher_vectors * nr_descriptors_T / np.sum(nr_descriptors_T)
+    slice_vw_counts = slice_data.counts * nr_descriptors_T / np.sum(nr_descriptors_T)
+
+    #
+    slice_vw_l2_norms = visual_word_l2_norm(fisher_vectors, visual_word_mask)
+    slice_vw_scores = visual_word_scores(fisher_vectors, weights, bias, visual_word_mask)
+
+    assert selector.integral
+
+    slice_vw_counts = integral(slice_vw_counts)
+    slice_vw_l2_norms = integral(slice_vw_l2_norms)
+    pos_slice_vw_scores = integral(only_positive(slice_vw_scores))
+    neg_slice_vw_scores = integral(only_negative(slice_vw_scores))
+    nr_descriptors_T = integral(nr_descriptors_T)
+
+    N = fisher_vectors.shape[0]
+
+    banned_intervals = []
+    results = []
+    T = slice_data.end_frames[-1] - slice_data.begin_frames[0]
+
+    ii = 0
+    heap = [(0, b_init_bounds((0, 0), (N, N)))]
+
+    bounding_function = ApproxNormsBoundingFunction(
+        pos_slice_vw_scores, neg_slice_vw_scores, slice_vw_counts,
+        slice_vw_l2_norms, max_window=max(deltas) / selector.chunk)
+
+    while True:
+
+        ii += 1
+
+        bounding_function.set_banned_intervals(banned_intervals)
+        score, idxs, heap = cy_efficient_subwindow_search(
+            bounding_function, heap, blacklist=banned_intervals, verbose=0)
 
         banned_intervals.append(idxs)
         results.append((
@@ -557,6 +628,17 @@ def evaluation(
                 'visual_word_mask': visual_word_mask
             },
         },
+        'cy_approx_ess': {
+            'train_params': {
+                'l2_norm_type': 'approx',
+                'empirical_standardizations': [False, True],
+                'sqrt_type': 'approx'
+            },
+            'sliding_window': cy_approx_sliding_window_ess,
+            'sliding_window_params': {
+                'visual_word_mask': visual_word_mask
+            },
+        },
     }
 
     chunk_size = CFG[src_cfg]['chunk_size']
@@ -629,7 +711,7 @@ def main():
         help="which dataset.")
     parser.add_argument(
         '-a', '--algorithm', required=True,
-        choices=('none', 'approx', 'approx_ess', 'exact'),
+        choices=('none', 'approx', 'approx_ess', 'cy_approx_ess', 'exact'),
         help="specifies the type of normalizations.")
     parser.add_argument(
         '--containing', action='store_true', default=False,

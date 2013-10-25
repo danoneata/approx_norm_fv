@@ -1,3 +1,35 @@
+# cython: profile=True
+import heapq
+
+import numpy as np
+cimport numpy as np
+
+# Data structures.
+cdef struct Interval:
+   int elem0 
+   int elem1
+
+
+cdef struct Bounds:
+    Interval low
+    Interval high
+
+
+cpdef Bounds b_init_bounds(tuple low, tuple high):
+    cdef Bounds bounds
+    bounds.low.elem0 = low[0]
+    bounds.low.elem1 = low[1]
+    bounds.high.elem0 = high[0]
+    bounds.high.elem1 = high[1]
+    return bounds
+
+
+cdef class Function:
+    cpdef double evaluate(self, Bounds bounds) except *:
+        return 0
+
+
+# General functions.
 cdef inline bint intersects(int x0, int x1, int y0, int y1):
     return min(x1, y1) > max(x0, y0)
 
@@ -14,12 +46,248 @@ cdef inline tuple get_inter(int x0, int x1, int y0, int y1):
     return (x1, y0) if x1 < y0 else (y0, x1)
 
 
-def in_blacklist(low, high, list blacklist):
+cdef int b_get_maximum_index(Bounds bounds):
 
-    u0, u1 = get_union(low[0], low[1], high[0], high[1])
-    i0, i1 = get_inter(low[0], low[1], high[0], high[1])
+    delta0 = bounds.high.elem0 - bounds.low.elem0
+    delta1 = bounds.high.elem1 - bounds.low.elem1
 
-    return (
-        any(contains(u0, u1, w[0], w[1]) for w in blacklist) or
-        any(intersects(i0, i1, w[0], w[1]) for w in blacklist))
+    if delta0 <= 0 and delta1 <= 0:
+        return -1
+    if delta0 >= delta1:
+        return 0
+    else:
+        return 1
+
+
+# Functions on the `Bounds` data structure.
+cdef bint b_is_legal(Bounds bounds):
+    return bounds.low.elem0 <= bounds.high.elem1
+
+
+cpdef tuple b_get_union(Bounds bounds):
+    return bounds.low.elem0, bounds.high.elem1
+
+
+cpdef tuple b_get_intersection(Bounds bounds):
+    return bounds.high.elem0, bounds.low.elem1
+
+
+cdef void b_print(Bounds bounds):
+    print "low=(%d,%d), high=(%d,%d)" % (
+        bounds.low.elem0, bounds.low.elem1,
+        bounds.high.elem0, bounds.high.elem1)
+
+
+cpdef bint b_in_blacklist(Bounds bounds, list blacklist):
+
+    cdef int u0, u1, i0, i1
+
+    u0, u1 = get_union(bounds.low.elem0, bounds.low.elem1, bounds.high.elem0, bounds.high.elem1)
+    i0, i1 = get_inter(bounds.low.elem0, bounds.low.elem1, bounds.high.elem0, bounds.high.elem1)
+
+    for w in blacklist:
+        if contains(u0, u1, w[0], w[1]) or intersects(i0, i1, w[0], w[1]):
+            return True
+    return False
+
+
+cpdef efficient_subwindow_search(
+    Function bounding_function,
+    heap,
+    list blacklist=[],
+    int verbose=0):
+
+    cdef Bounds bounds
+    cdef Bounds bounds_i
+    cdef Bounds bounds_j
+    cdef int ii, split_index, middle
+    cdef double score
+
+    for ii in xrange(10000):
+
+        if verbose > 2:
+            print ii, heap
+
+        score, bounds = heapq.heappop(heap)
+
+        if verbose > 2:
+            print "Pop", score, bounds
+
+        if len(blacklist) > 0 and b_in_blacklist(bounds, blacklist):
+            continue
+
+        # Branch...
+        split_index = b_get_maximum_index(bounds)
+
+        if split_index == -1:
+            break
+
+        bounds_i.low.elem0 = bounds.low.elem0
+        bounds_i.low.elem1 = bounds.low.elem1
+        bounds_i.high.elem0 = bounds.high.elem0
+        bounds_i.high.elem1 = bounds.high.elem1
+
+        bounds_j.low.elem0 = bounds.low.elem0
+        bounds_j.low.elem1 = bounds.low.elem1
+        bounds_j.high.elem0 = bounds.high.elem0
+        bounds_j.high.elem1 = bounds.high.elem1
+
+        if split_index == 0:
+            middle = (bounds.low.elem0 + bounds.high.elem0) / 2
+            bounds_i.high.elem0 = middle
+            bounds_j.low.elem0 = middle + 1
+        elif split_index == 1:
+            middle = (bounds.low.elem1 + bounds.high.elem1) / 2
+            bounds_i.high.elem1 = middle
+            bounds_j.low.elem1 = middle + 1
+
+        # ... and bound.
+        if b_is_legal(bounds_i):
+            score = bounding_function.evaluate(bounds_i)
+            heapq.heappush(heap, (-score, bounds_i))
+
+            if verbose > 2:
+                print "Push", score, bounds_i
+
+        if b_is_legal(bounds_j):
+            score = bounding_function.evaluate(bounds_j)
+            heapq.heappush(heap, (-score, bounds_j))
+
+            if verbose > 2:
+                print "Push", score, bounds_j
+
+        if verbose > 2:
+            print
+
+    elem0 = (bounds.low.elem0 + bounds.high.elem0) / 2
+    elem1 = (bounds.low.elem1 + bounds.high.elem1) / 2
+
+    return - score,  (elem0, elem1), heap
+
+
+cdef class LinearBoundingFunction(Function):
+    cdef np.ndarray pos_integral_scores
+    cdef np.ndarray neg_integral_scores
+
+    def __init__(self, scores):
+        self.pos_integral_scores, self.neg_integral_scores = self._pos_neg_integral(scores)
+
+    cpdef double evaluate(self, Bounds bounds) except *:
+        uu = b_get_union(bounds)
+        ii = b_get_intersection(bounds)
+
+        pos_union = self._eval_integral(self.pos_integral_scores, uu)
+        neg_inter = self._eval_integral(self.neg_integral_scores, ii)
+
+        return pos_union + neg_inter
+
+    def _eval_integral(self, X, bb):
+        low, high = bb
+        return X[high] - X[low] if high > low else 0
+
+    def _pos_neg_integral(self, scores):
+        """Works only for 1D arrays at the moment, but can be easily extended."""
+        scores = np.hstack([[0], scores])  # Padding.
+        pos_scores, neg_scores = scores.copy(), scores.copy()
+        idxs = scores >= 0
+        pos_scores[~idxs], neg_scores[idxs] = 0, 0
+        return np.cumsum(pos_scores), np.cumsum(neg_scores)
+
+
+cdef class ApproxNormsBoundingFunction(Function):
+
+    cdef np.ndarray pos_slice_vw_scores
+    cdef np.ndarray neg_slice_vw_scores
+    cdef np.ndarray slice_vw_counts
+    cdef np.ndarray slice_vw_l2_norms
+    cdef int max_window
+    cdef list banned_intervals
+
+    def __init__(
+        self,
+        np.ndarray[np.float64_t, ndim=2] pos_slice_vw_scores,
+        np.ndarray[np.float64_t, ndim=2] neg_slice_vw_scores,
+        np.ndarray[np.float64_t, ndim=2] slice_vw_counts,
+        np.ndarray[np.float64_t, ndim=2] slice_vw_l2_norms,
+        int max_window):
+
+        self.pos_slice_vw_scores = pos_slice_vw_scores 
+        self.neg_slice_vw_scores = neg_slice_vw_scores 
+        self.slice_vw_counts = slice_vw_counts
+        self.slice_vw_l2_norms = slice_vw_l2_norms
+
+        self.max_window = max_window
+
+    def set_banned_intervals(self, banned_intervals):
+        self.banned_intervals = banned_intervals
+
+    cpdef double evaluate(self, Bounds bounds) except *:
+
+        cdef tuple uu
+        cdef tuple ii
+        cdef np.ndarray[np.uint8_t, ndim=1, cast=True] idxs_inter, idxs_union
+        cdef np.ndarray[np.float64_t, ndim=1] score_union, score_inter, counts_union, counts_inter, l2_norms_inter
+        cdef double bound_sqrt_scores, bound_approx_l2_norm
+
+        uu = b_get_union(bounds)
+        ii = b_get_intersection(bounds)
+
+        if ii[0] == ii[1] == uu[0] == uu[1]:
+            return - np.inf
+
+        if ii[1] - ii[0] > self.max_window:
+            return - np.inf
+
+        if ii[1] <= ii[0]:
+            return + np.inf
+
+        l2_norms_inter = self._eval_integral(self.slice_vw_l2_norms, ii)
+        if np.all(l2_norms_inter == 0):
+            return - np.inf
+
+        if len(self.banned_intervals) > 0 and b_in_blacklist(bounds, self.banned_intervals):
+            return - np.inf
+
+        score_union = self._eval_integral(self.pos_slice_vw_scores, uu)
+        score_inter = self._eval_integral(self.neg_slice_vw_scores, ii)
+
+        counts_union = self._eval_integral(self.slice_vw_counts, uu)
+        counts_inter = self._eval_integral(self.slice_vw_counts, ii)
+
+        idxs_inter = counts_inter == 0
+        idxs_union = counts_union == 0
+
+        bound_sqrt_scores = np.sum(((
+            np.ma.array(score_union, mask=idxs_union) +
+            np.ma.array(score_inter, mask=idxs_inter)) /
+            np.sqrt(np.ma.array(counts_inter, mask=idxs_inter))).filled(0))
+
+        bound_approx_l2_norm = np.sum((
+            np.ma.array(l2_norms_inter, mask=idxs_inter) /
+            np.ma.array(counts_union, mask=idxs_union)).filled(0))
+
+        return bound_sqrt_scores / np.sqrt(bound_approx_l2_norm)
+
+    cpdef np.ndarray _eval_integral(
+        self,
+        np.ndarray[np.float64_t, ndim=2] X,
+        tuple bb):
+
+        low, high = bb
+        return X[high, :] - X[low, :] if high > low else np.zeros(X.shape[1]) 
+
+
+def test():
+    cdef Bounds bounds
+    scores = [-2, 1, -3, 4, -1, 2, 1, -5, 4]
+
+    bounds.low.elem0 = 0
+    bounds.low.elem1 = 0
+    bounds.high.elem0 = len(scores)
+    bounds.high.elem1 = len(scores)
+
+    foo = LinearBoundingFunction(scores)
+    heap = [(0, bounds)]
+
+    return efficient_subwindow_search(foo, heap)
 
