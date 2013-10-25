@@ -115,13 +115,7 @@ cpdef efficient_subwindow_search(
 
     for ii in xrange(10000):
 
-        if verbose > 2:
-            print ii, heap
-
         score, bounds = heapq.heappop(heap)
-
-        if verbose > 2:
-            print "Pop", score, bounds
 
         if len(blacklist) > 0 and b_in_blacklist(bounds, blacklist):
             continue
@@ -156,18 +150,9 @@ cpdef efficient_subwindow_search(
             score = bounding_function.evaluate(bounds_i)
             heapq.heappush(heap, (-score, bounds_i))
 
-            if verbose > 2:
-                print "Push", score, bounds_i
-
         if b_is_legal(bounds_j):
             score = bounding_function.evaluate(bounds_j)
             heapq.heappush(heap, (-score, bounds_j))
-
-            if verbose > 2:
-                print "Push", score, bounds_j
-
-        if verbose > 2:
-            print
 
     elem0 = (bounds.low.elem0 + bounds.high.elem0) / 2
     elem1 = (bounds.low.elem1 + bounds.high.elem1) / 2
@@ -295,5 +280,5 @@ def test():
     foo = LinearBoundingFunction(scores)
     heap = [(0, bounds)]
 
-    return efficient_subwindow_search(foo, heap)
+    return efficient_subwindow_search(foo, heap, verbose=3)
 
