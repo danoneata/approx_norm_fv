@@ -533,6 +533,7 @@ def cy_approx_sliding_window_ess(
     T = slice_data.end_frames[-1] - slice_data.begin_frames[0]
 
     ii = 0
+    covered = 0
     heap = [(0, b_init_bounds((0, 0), (N, N)))]
 
     bounding_function = ApproxNormsBoundingFunction(
@@ -548,15 +549,16 @@ def cy_approx_sliding_window_ess(
             bounding_function, heap, blacklist=banned_intervals, verbose=0)
 
         banned_intervals.append(idxs)
+        if covered >= N or score == - np.inf:
+            break
+
         results.append((
             slice_data.begin_frames[np.minimum(N - 1, idxs[0])],
             slice_data.begin_frames[idxs[1]] if idxs[1] < N else slice_data.end_frames[-1],
             score))
 
-        covered = np.sum((res[1] - res[0] for res in results))
+        covered += idxs[1] - idxs[0]
 
-        if covered >= T - 1:
-            break
 
     return results
 
