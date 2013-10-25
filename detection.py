@@ -498,6 +498,7 @@ def cy_approx_sliding_window_ess(
     from utils_ess import b_get_intersection
     from utils_ess import b_in_blacklist
     from utils_ess import b_init_bounds
+    from utils_ess import b_init_interval
     from utils_ess import efficient_subwindow_search as cy_efficient_subwindow_search
 
     weights, bias = clf
@@ -548,17 +549,16 @@ def cy_approx_sliding_window_ess(
         score, idxs, heap = cy_efficient_subwindow_search(
             bounding_function, heap, blacklist=banned_intervals, verbose=0)
 
-        banned_intervals.append(idxs)
         if covered >= N or score == - np.inf:
             break
 
+        banned_intervals.append(b_init_interval(idxs))
         results.append((
             slice_data.begin_frames[np.minimum(N - 1, idxs[0])],
             slice_data.begin_frames[idxs[1]] if idxs[1] < N else slice_data.end_frames[-1],
             score))
 
         covered += idxs[1] - idxs[0]
-
 
     return results
 

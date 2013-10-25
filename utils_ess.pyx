@@ -16,13 +16,20 @@ cdef extern from "math.h":
 
 # Data structures.
 cdef struct Interval:
-   int elem0 
-   int elem1
+   unsigned int elem0
+   unsigned int elem1
 
 
 cdef struct Bounds:
     Interval low
     Interval high
+
+
+cpdef Interval b_init_interval(tuple tt):
+    cdef Interval interval
+    interval.elem0 = tt[0]
+    interval.elem1 = tt[1]
+    return interval
 
 
 cpdef Bounds b_init_bounds(tuple low, tuple high):
@@ -90,14 +97,29 @@ cdef void b_print(Bounds bounds):
 
 cpdef bint b_in_blacklist(Bounds bounds, list blacklist):
 
-    cdef int u0, u1, i0, i1
+    cdef Interval w
+    cdef unsigned int u0, u1, i0, i1
 
-    u0, u1 = get_union(bounds.low.elem0, bounds.low.elem1, bounds.high.elem0, bounds.high.elem1)
-    i0, i1 = get_inter(bounds.low.elem0, bounds.low.elem1, bounds.high.elem0, bounds.high.elem1)
+    # Get union interval.
+    if bounds.low.elem0 < bounds.high.elem1:
+        u0 = bounds.low.elem0
+        u1 = bounds.high.elem1
+    else:
+        u1 = bounds.low.elem0
+        u0 = bounds.high.elem1
+
+    # Get intersection interval.
+    if bounds.low.elem1 < bounds.high.elem0:
+        i0 = bounds.low.elem1
+        i1 = bounds.high.elem0
+    else:
+        i1 = bounds.low.elem1
+        i0 = bounds.high.elem0
 
     for w in blacklist:
-        if contains(u0, u1, w[0], w[1]) or intersects(i0, i1, w[0], w[1]):
+        if contains(u0, u1, w.elem0, w.elem1) or intersects(i0, i1, w.elem0, w.elem1):
             return True
+
     return False
 
 
