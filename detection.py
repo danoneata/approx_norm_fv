@@ -422,10 +422,13 @@ def approx_sliding_window_ess(
         union = bounds.get_union()
         inter = bounds.get_intersection()
 
-        if inter[0] == inter[1] == union[0] == union[1] or union[0] == union[1]:
+        if inter[0] == inter[1] == union[0] == union[1] or union[0] >= union[1]:
             return - np.inf
 
         if inter[1] - inter[0] > max(deltas) / selector.chunk:
+            return - np.inf
+
+        if union[1] - union[0] < min(deltas) / selector.chunk:
             return - np.inf
 
         if inter[1] <= inter[0]:
@@ -483,7 +486,7 @@ def approx_sliding_window_ess(
 
         score, idxs, heap = efficient_subwindow_search(
             lambda bounds: bounding_function(bounds, banned_intervals),
-            heap, blacklist=banned_intervals, verbose=0)
+            heap, blacklist=banned_intervals, verbose=2)
 
         banned_intervals.append(idxs)
         results.append((
@@ -495,6 +498,9 @@ def approx_sliding_window_ess(
 
         if covered >= N or score == - np.inf:
             break
+
+        if results[-1][0] >= results[-1][1]:
+            pdb.set_trace()
 
     return results
 
@@ -558,7 +564,8 @@ def cy_approx_sliding_window_ess(
     bounding_function = ApproxNormsBoundingFunction(
         slice_vw_scores_no_integral, slice_vw_l2_norms_no_integral,
         pos_slice_vw_scores, neg_slice_vw_scores, slice_vw_counts,
-        slice_vw_l2_norms, max_window=max(deltas) / selector.chunk)
+        slice_vw_l2_norms, min_window=min(deltas) / selector.chunk,
+        max_window=max(deltas) / selector.chunk)
 
     while True:
 
@@ -576,6 +583,9 @@ def cy_approx_sliding_window_ess(
             slice_data.begin_frames[np.minimum(N - 1, idxs[0])],
             slice_data.begin_frames[idxs[1]] if idxs[1] < N else slice_data.end_frames[-1],
             score))
+
+        if results[-1][0] >= results[-1][1]:
+            pdb.set_trace()
 
         covered += idxs[1] - idxs[0]
 
@@ -728,7 +738,7 @@ def main():
         description="Approximating the normalizations for the detection task.")
 
     parser.add_argument(
-        '-d', '--dataset', required=True, choices=('cc', 'cc.stab'),
+        '-d', '--dataset', required=True, choices=('cc', 'cc.stab', 'cc.no_stab'),
         help="which dataset.")
     parser.add_argument(
         '-a', '--algorithm', required=True,

@@ -135,7 +135,7 @@ cpdef efficient_subwindow_search(
     cdef int ii, split_index, middle
     cdef double score
 
-    for ii in xrange(10000):
+    for ii in xrange(100000):
 
         score, bounds = heapq.heappop(heap)
 
@@ -219,6 +219,7 @@ cdef class ApproxNormsBoundingFunction(Function):
     cdef np.ndarray neg_slice_vw_scores
     cdef np.ndarray slice_vw_counts
     cdef np.ndarray slice_vw_l2_norms
+    cdef int min_window
     cdef int max_window
     cdef list banned_intervals
 
@@ -230,6 +231,7 @@ cdef class ApproxNormsBoundingFunction(Function):
         np.ndarray[np.float64_t, ndim=2] neg_slice_vw_scores,
         np.ndarray[np.float64_t, ndim=2] slice_vw_counts,
         np.ndarray[np.float64_t, ndim=2] slice_vw_l2_norms,
+        int min_window,
         int max_window):
 
         self.slice_vw_scores_no_integral = slice_vw_scores_no_integral
@@ -239,6 +241,7 @@ cdef class ApproxNormsBoundingFunction(Function):
         self.slice_vw_counts = slice_vw_counts
         self.slice_vw_l2_norms = slice_vw_l2_norms
 
+        self.min_window = min_window
         self.max_window = max_window
 
     def set_banned_intervals(self, banned_intervals):
@@ -257,10 +260,13 @@ cdef class ApproxNormsBoundingFunction(Function):
         uu = b_get_union(bounds)
         ii = b_get_intersection(bounds)
 
-        if ii[0] == ii[1] == uu[0] == uu[1] or uu[0] == uu[1]:
+        if ii[0] == ii[1] == uu[0] == uu[1] or uu[0] >= uu[1]:
             return - np.inf
 
         if ii[1] - ii[0] > self.max_window:
+            return - np.inf
+
+        if uu[1] - uu[0] < self.min_window:
             return - np.inf
 
         # Empty intersection.
