@@ -99,6 +99,18 @@ CFG = {
         },
         'metric': 'average_precision',
     },
+    'hollywood2.delta_5.all_descs':{
+        'dataset_name': 'hollywood2',
+        'dataset_params': {
+            'ip_type': 'dense5.track15hog,hof,mbh',
+            'nr_clusters': 256,
+            'suffix': '.delta_5',
+        },
+        'eval_name': 'hollywood2',
+        'eval_params': {
+        },
+        'metric': 'average_precision',
+    },
     'dummy': {
         'dataset_name': '',
         'dataset_params': {
@@ -132,6 +144,19 @@ CFG = {
         },
         'metric': 'average_precision',
         'chunk_size': 30,
+    },
+    'cc.no_stab':{
+        'dataset_name': 'cc',
+        'dataset_params': {
+            'ip_type': 'dense5.track15mbh',
+            'nr_clusters': 128,
+            'suffix': '.delta_5.no_stab',
+        },
+        'eval_name': 'cc',
+        'eval_params': {
+        },
+        'metric': 'average_precision',
+        'chunk_size': 5,
     },
     'cc.stab':{
         'dataset_name': 'cc',
@@ -385,6 +410,9 @@ def load_slices(dataset, samples, analytical_fim=True, outfile=None, verbose=0):
             dataset, sample, analytical_fim=analytical_fim,
             **LOAD_SAMPLE_DATA_PARAMS)
 
+        if len(fv) == 0:
+            continue
+
         if str(sample) in names:
             continue
 
@@ -509,7 +537,7 @@ def load_normalized_tr_data(
     dataset, nr_slices_to_aggregate, l2_norm_type, empirical_standardizations,
     sqrt_type, analytical_fim, tr_outfile, verbose):
 
-    D, K = 64, dataset.VOC_SIZE
+    D, K = dataset.NR_PCA_DIMS, dataset.VOC_SIZE
 
     # Load slices for train data, because I need to propaget the empirical
     # standardization into the slice L2 norms.
