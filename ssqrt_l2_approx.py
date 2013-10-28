@@ -31,7 +31,7 @@ from load_data import load_sample_data
 
 
 # TODO Possible improvements:
-# [ ] Share the `SliceData` data structure with the `detection.py` module. 
+# [ ] Share the `SliceData` data structure with the `detection.py` module.
 # [ ] Isolate the dataset configuration into another module and the loading functions.
 # [ ] Isolate the utils.
 # [ ] Pre-allocate test data (counts, L2 norms and scores).
@@ -44,7 +44,7 @@ from load_data import load_sample_data
 
 SliceData = namedtuple('SliceData', ['fisher_vectors', 'counts', 'nr_descriptors'])
 
-    
+   
 hmdb_stab_dict = {
     'hmdb_split%d.stab' % ii :{
         'dataset_name': 'hmdb_split%d' % ii,
@@ -105,6 +105,7 @@ CFG = {
             'ip_type': 'dense5.track15hog,hof,mbh',
             'nr_clusters': 256,
             'suffix': '.delta_5',
+            'separate_pca': True,
         },
         'eval_name': 'hollywood2',
         'eval_params': {
@@ -265,7 +266,7 @@ def build_aggregation_mask(names):
             ii += 1
             seen.append(name)
         idxs.append(ii)
-        
+       
     nn = len(seen)
     N = len(names)
     mask = np.zeros((N, nn))
@@ -286,7 +287,7 @@ def build_slice_agg_mask(N, n_group):
     yidxs = range(N)
     xidxs = map(int, np.array(yidxs) / n_group)
 
-    M = np.int(np.ceil(float(N) / n_group)) 
+    M = np.int(np.ceil(float(N) / n_group))
     mask = np.zeros((M, N))
     mask[xidxs, yidxs] = 1.
 
@@ -352,7 +353,7 @@ def approximate_video_scores(
 def sum_by(data, mask=None):
     """Sums together rows of `data` according to the sparse matrix `mask`. If
     `mask` is None, then sums all the rows.
-    
+   
     """
     if mask is None:
         return np.sum(data, axis=0)
@@ -392,6 +393,88 @@ def sum_and_scale_by(data, coef, mask=None):
 def sum_and_scale_by_squared(data, coef, mask=None):
     coef_ = coef[:, np.newaxis]
     return sum_by(data * (coef_ ** 2), mask=mask) / sum_by(coef_, mask=mask) ** 2
+
+
+#@my_cacher('np')
+def load_corrected_norms(
+    dataset, samples, nr_slices_to_aggregate, scalers, analytical_fim,
+    verbose=0, outfile=None):
+
+    jj = 0
+    N = len(samples)
+    D, K = dataset.D, dataset.VOC_SIZE
+
+    visual_word_mask = build_visual_word_mask(D, K)
+    tr_l2_norms = np.zeros((N, K), dtype=np.float32)
+    names = []
+
+    for sample in samples:
+
+        fv, ii, cc, _ = load_sample_data(
+            dataset, sample, analytical_fim=analytical_fim,
+            **LOAD_SAMPLE_DATA_PARAMS)
+
+        if len(fv) == 0 or str(sample) in names:
+            continue
+
+        nd = ii['nr_descs']
+        nd = nd[nd != 0]
+        ll = ii['label']
+
+        slice_agg_mask = build_slice_agg_mask(fv.shape[0], nr_slices_to_aggregate)
+        agg_fisher_vectors = sum_by(fv * nd[:, np.newaxis], mask=slice_agg_mask) / nd.sum()
+        for scaler in scalers:
+            if scaler is None:
+                continue
+            agg_fisher_vectors = scaler.transform(agg_fisher_vectors)
+        tr_l2_norms[jj] = np.sum(
+            visual_word_l2_norm(agg_fisher_vectors, visual_word_mask), axis=0)
+        names.append(str(sample))
+
+        jj += 1
+
+        if verbose:
+            print '%5d %5d %s' % (jj, fv.shape[0], sample.movie)
+
+    return [tr_l2_norms[:jj]]
+
+
+@my_cacher('np', 'np', 'cp')
+def load_video_data(dataset, samples, analytical_fim, verbose=0, outfile=None):
+
+    jj = 0
+    N = len(samples)
+    D, K = dataset.D, dataset.VOC_SIZE
+
+    tr_video_data = np.zeros((N, 2 * D * K), dtype=np.float32)
+    tr_video_counts = np.zeros((N, K), dtype=np.float32)
+    tr_video_labels = []
+    tr_video_names = []
+
+    for sample in samples:
+
+        fv, ii, cc, _ = load_sample_data(
+            dataset, sample, analytical_fim=analytical_fim,
+            **LOAD_SAMPLE_DATA_PARAMS)
+
+        if len(fv) == 0 or str(sample) in tr_video_names:
+            continue
+
+        nd = ii['nr_descs']
+        nd = nd[nd != 0][:, np.newaxis]
+        ll = ii['label']
+
+        tr_video_data[jj] = (fv * nd).sum(axis=0) / nd.sum()
+        tr_video_counts[jj] = (cc * nd).sum(axis=0) / nd.sum()
+        tr_video_labels.append(ll)
+        tr_video_names.append(str(sample))
+
+        jj += 1
+
+        if verbose:
+            print '%5d %5d %s' % (jj, fv.shape[0], sample.movie)
+
+    return tr_video_data[:jj], tr_video_counts[:jj], tr_video_labels[:jj]
 
 
 @my_cacher('np', 'np', 'np', 'np', 'cp', 'cp')
@@ -517,10 +600,10 @@ def evaluate_worker((
         # Apply exact normalization on the test video data.
         if tr_scalers[0] is not None:
             video_data = tr_scalers[0].transform(video_data)
-        video_data = power_normalize(video_data, 0.5) 
+        video_data = power_normalize(video_data, 0.5)
         if tr_scalers[1] is not None:
             video_data = tr_scalers[1].transform(video_data)
-        video_data = exact_l2_normalize(video_data) 
+        video_data = exact_l2_normalize(video_data)
 
         # Apply linear classifier.
         predictions = np.sum(- video_data * weight, axis=1)
@@ -537,42 +620,12 @@ def load_normalized_tr_data(
     dataset, nr_slices_to_aggregate, l2_norm_type, empirical_standardizations,
     sqrt_type, analytical_fim, tr_outfile, verbose):
 
-    D, K = dataset.NR_PCA_DIMS, dataset.VOC_SIZE
+    D, K = dataset.D, dataset.VOC_SIZE
 
-    # Load slices for train data, because I need to propaget the empirical
-    # standardization into the slice L2 norms.
     samples, _ = dataset.get_data('train')
-    (slice_fisher_vectors, slice_counts,
-     slice_nr_descs, nr_slices, _, tr_video_labels) = load_slices(
-         dataset, samples, analytical_fim, outfile=tr_outfile,
-         verbose=verbose)
-
-    # Simulate `nr_slices_to_aggregate` times bigger slices than the base
-    # length.
-    slice_data = SliceData(slice_fisher_vectors, slice_counts, slice_nr_descs)
-    agg_slice_data = slice_aggregator(
-        slice_data, nr_slices, nr_slices_to_aggregate)
-
-
-    # Build video mask.
-    video_mask = build_aggregation_mask(
-        sum([[ii] * int(np.ceil(float(nn) / nr_slices_to_aggregate))
-             for ii, nn in enumerate(nr_slices)],
-            []))
-
-    # Scale slices by the number of descriptors.
-    tr_slice_data = scale_by(
-        agg_slice_data.fisher_vectors,
-        agg_slice_data.nr_descriptors,
-        mask=video_mask)
-
-    # Aggregate Fisher vectors and counts per video.
-    tr_video_data = scale_and_sum_by(
-        agg_slice_data.fisher_vectors, agg_slice_data.nr_descriptors,
-        data_mask=video_mask, coef_mask=video_mask)
-    tr_video_counts = scale_and_sum_by(
-        agg_slice_data.counts, agg_slice_data.nr_descriptors,
-        data_mask=video_mask, coef_mask=video_mask)
+    tr_video_data, tr_video_counts, tr_video_labels = load_video_data(
+        dataset, samples, analytical_fim, verbose,
+        outfile=tr_outfile + ".video")
 
     if verbose:
         print "Normalizing train data."
@@ -582,7 +635,7 @@ def load_normalized_tr_data(
         print "\tEmpirical standardization:", empirical_standardizations[1]
         print "\tL2 norm:", l2_norm_type
 
-    def l2_normalize(data):
+    def l2_normalize(data, **kwargs):
         if l2_norm_type == 'exact':
             return exact_l2_normalize(data)
         elif l2_norm_type == 'approx':
@@ -591,9 +644,10 @@ def load_normalized_tr_data(
             else:
                 counts = tr_video_counts
             # Prepare the L2 norms using the possibly modified `tr_slice_data`.
-            vw_mask = build_visual_word_mask(D, K)
-            tr_video_l2_norms = sum_by(
-                visual_word_l2_norm(tr_slice_data, vw_mask), mask=video_mask)
+            tr_video_l2_norms = load_corrected_norms(
+                dataset, samples, nr_slices_to_aggregate,
+                analytical_fim=analytical_fim, scalers=kwargs.get('scalers'),
+                verbose=verbose)[0]
             return approx_l2_normalize(data, tr_video_l2_norms, counts)
         elif l2_norm_type == 'none':
             return data
@@ -616,7 +670,6 @@ def load_normalized_tr_data(
     if empirical_standardizations[0]:
         scaler = StandardScaler(with_mean=False)
         tr_video_data = scaler.fit_transform(tr_video_data)
-        tr_slice_data = scaler.transform(tr_slice_data)
         scalers.append(scaler)
     else:
         scalers.append(None)
@@ -628,13 +681,12 @@ def load_normalized_tr_data(
     if empirical_standardizations[1]:
         scaler = StandardScaler(with_mean=False)
         tr_video_data = scaler.fit_transform(tr_video_data)
-        tr_slice_data = scaler.transform(tr_slice_data)
         scalers.append(scaler)
     else:
         scalers.append(None)
 
     # L2 normalization ("true" or "approx").
-    tr_video_data = l2_normalize(tr_video_data)
+    tr_video_data = l2_normalize(tr_video_data, scalers=scalers)
 
     return tr_video_data, tr_video_labels, scalers
 
@@ -730,10 +782,10 @@ def evaluation(
             tl = eval.lb.transform(te_labels)[:, ii]
             true_labels[ii].append(tl)
             predictions[ii].append(pd)
-        if verbose > 1: print 
+        if verbose > 1: print
 
     # Prepare labels.
-    for cls in true_labels.keys(): 
+    for cls in true_labels.keys():
         true_labels[cls] = np.hstack(true_labels[cls]).squeeze()
         predictions[cls] = np.hstack(predictions[cls]).squeeze()
 
