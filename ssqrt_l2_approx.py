@@ -332,12 +332,12 @@ def compute_average_precision(true_labels, predictions, verbose=0):
     print "mAP %6.2f" % (100 * np.mean(average_precisions))
 
 
-def compute_accuracy(label_binarizer, true_labels, predictions, verbose=0):
+def compute_accuracy(true_labels, predictions, verbose=0):
     all_predictions = np.vstack((predictions[ii] for ii in sorted(predictions.keys())))
     all_true_labels = np.vstack((true_labels[ii] for ii in sorted(true_labels.keys())))
 
-    label_binarizer.multilabel = False
-    array_true_labels = label_binarizer.inverse_transform(all_true_labels.T)
+    # FIXME Dodgy
+    array_true_labels = np.hstack([np.where(row==1)[0] for row in all_true_labels.T])
 
     predicted_class = np.argmax(all_predictions, axis=0)
     print "Accuracy %6.2f" % (100 * accuracy_score(array_true_labels, predicted_class))
@@ -384,14 +384,16 @@ def evaluate_worker((
 
 def load_normalized_tr_data(
     dataset, nr_slices_to_aggregate, l2_norm_type, empirical_standardizations,
-    sqrt_type, analytical_fim, tr_outfile, verbose):
+    sqrt_type, analytical_fim, tr_outfile, verbose, samples=None):
 
     D, K = dataset.D, dataset.VOC_SIZE
 
-    samples, _ = dataset.get_data('train')
+    if samples is None:
+        samples, _ = dataset.get_data('train')
+
     tr_video_data, tr_video_counts, tr_video_labels = load_video_data(
-        dataset, samples, analytical_fim, verbose,
-        outfile=tr_outfile + ".video")
+        dataset, samples, analytical_fim=analytical_fim, verbose=verbose,
+        outfile=tr_outfile)
 
     if verbose:
         print "Normalizing train data."
@@ -410,10 +412,13 @@ def load_normalized_tr_data(
             else:
                 counts = tr_video_counts
             # Prepare the L2 norms using the possibly modified `tr_slice_data`.
+            scalers = kwargs.get('scalers')
+            norm_filename = tr_outfile + ".norm_slices%d_scaler%s" % (
+                nr_slices_to_aggregate, np.any(scalers))
             tr_video_l2_norms = load_corrected_norms(
                 dataset, samples, nr_slices_to_aggregate,
-                analytical_fim=analytical_fim, scalers=kwargs.get('scalers'),
-                verbose=verbose)[0]
+                analytical_fim=analytical_fim, scalers=scalers,
+                verbose=verbose, outfile=norm_filename)[0]
             return approx_l2_normalize(data, tr_video_l2_norms, counts)
         elif l2_norm_type == 'none':
             return data
@@ -457,21 +462,20 @@ def load_normalized_tr_data(
     return tr_video_data, tr_video_labels, scalers
 
 
-def evaluation(
+def predict_main(
     src_cfg, sqrt_type, empirical_standardizations, l2_norm_type,
-    prediction_type, analytical_fim, nr_slices_to_aggregate=1, nr_threads=4,
-    verbose=0):
+    prediction_type, analytical_fim, part, nr_slices_to_aggregate=1,
+    nr_threads=4, verbose=0):
 
     dataset = Dataset(CFG[src_cfg]['dataset_name'], **CFG[src_cfg]['dataset_params'])
-    D, K = 64, dataset.VOC_SIZE
+    D, K = dataset.D, dataset.VOC_SIZE
 
     if verbose:
         print "Loading train data."
 
-    generic_tr_outfile = '/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_train%s.dat'
-    afim_suffix = '_afim_%s' % analytical_fim
-    tr_outfile = generic_tr_outfile % afim_suffix
-
+    tr_outfile = os.path.join(
+        CACHE_PATH, "%s_train_afim_%s_pi_%s_sqrt_nr_descs_%s.dat" % (
+            src_cfg, analytical_fim, False, False))
     tr_video_data, tr_video_labels, tr_scalers = load_normalized_tr_data(
         dataset, nr_slices_to_aggregate, l2_norm_type,
         empirical_standardizations, sqrt_type, analytical_fim, tr_outfile,
@@ -493,74 +497,121 @@ def evaluation(
     if verbose:
         print "Loading test data."
 
-    te_outfile = ('/scratch2/clear/oneata/tmp/joblib/' + src_cfg + '_test%s_%d.dat')
     te_samples, _ = dataset.get_data('test')
-    CHUNK_SIZE = 1000
     visual_word_mask = build_visual_word_mask(D, K)
 
-    true_labels = defaultdict(list)
-    predictions = defaultdict(list)
+    te_outfile = os.path.join(
+        CACHE_PATH, "%s_test_afim_%s_pi_%s_sqrt_nr_descs_%s_part_%s.dat" % (
+            src_cfg, analytical_fim, False, False, "%d"))
 
-    for ii, low in enumerate(xrange(0, len(te_samples), CHUNK_SIZE)):
+    low = CFG[src_cfg]['samples_chunk'] * part
+    high = np.minimum(CFG[src_cfg]['samples_chunk'] * (part + 1), len(te_samples))
 
-        if verbose:
-            print "\tPart %3d from %5d to %5d." % (ii, low, low + CHUNK_SIZE)
-            print "\tEvaluating on %d threads." % nr_threads
+    if verbose:
+        print "\tPart %3d from %5d to %5d." % (part, low, high)
+        print "\tEvaluating on %d threads." % nr_threads
 
-        te_outfile_ii = te_outfile % (afim_suffix, ii)
-        fisher_vectors, counts, nr_descs, nr_slices, _, te_labels = load_slices(
-            dataset, te_samples, analytical_fim, outfile=te_outfile_ii,
-            verbose=verbose)
-        slice_data = SliceData(fisher_vectors, counts, nr_descs)
+    te_outfile_ii = te_outfile % part
+    fisher_vectors, counts, nr_descs, nr_slices, _, te_labels = load_slices(
+        dataset, te_samples[low: high], analytical_fim, outfile=te_outfile_ii,
+        verbose=verbose)
+    slice_data = SliceData(fisher_vectors, counts, nr_descs)
 
-        agg_slice_data = slice_aggregator(slice_data, nr_slices, nr_slices_to_aggregate)
-        agg_slice_data = agg_slice_data._replace(
-            fisher_vectors=(agg_slice_data.fisher_vectors *
-                            agg_slice_data.nr_descriptors[:, np.newaxis]))
+    agg_slice_data = slice_aggregator(slice_data, nr_slices, nr_slices_to_aggregate)
+    agg_slice_data = agg_slice_data._replace(
+        fisher_vectors=(agg_slice_data.fisher_vectors *
+                        agg_slice_data.nr_descriptors[:, np.newaxis]))
 
-        video_mask = build_aggregation_mask(
-            sum([[ii] * int(np.ceil(float(nn) / nr_slices_to_aggregate))
-                 for ii, nn in enumerate(nr_slices)],
-                []))
+    video_mask = build_aggregation_mask(
+        sum([[ii] * int(np.ceil(float(nn) / nr_slices_to_aggregate))
+             for ii, nn in enumerate(nr_slices)],
+            []))
 
-        if verbose:
-            print "\tTest data: %dx%d." % agg_slice_data.fisher_vectors.shape
+    if verbose:
+        print "\tTest data: %dx%d." % agg_slice_data.fisher_vectors.shape
 
-        # Scale the FVs in the main program, to avoid blowing up the memory
-        # when doing multi-threading, since each thread will make a copy of the
-        # data when transforming the data.
-        if prediction_type == 'approx':
-            for tr_scaler in tr_scalers:
-                if tr_scaler is None:
-                    continue
-                agg_slice_data = agg_slice_data._replace(
-                    fisher_vectors=tr_scaler.transform(
-                        agg_slice_data.fisher_vectors))
+    # Scale the FVs in the main program, to avoid blowing up the memory
+    # when doing multi-threading, since each thread will make a copy of the
+    # data when transforming the data.
+    if prediction_type == 'approx':
+        for tr_scaler in tr_scalers:
+            if tr_scaler is None:
+                continue
+            agg_slice_data = agg_slice_data._replace(
+                fisher_vectors=tr_scaler.transform(
+                    agg_slice_data.fisher_vectors))
 
-        eval_args = [
-            (ii, eval, tr_video_data, tr_scalers, agg_slice_data, video_mask,
-             visual_word_mask, prediction_type, verbose)
-            for ii in xrange(eval.nr_classes)]
-        evaluator = threads.ParallelIter(nr_threads, eval_args, evaluate_worker)
+    eval_args = [
+        (ii, eval, tr_video_data, tr_scalers, agg_slice_data, video_mask,
+         visual_word_mask, prediction_type, verbose)
+        for ii in xrange(eval.nr_classes)]
+    evaluator = threads.ParallelIter(nr_threads, eval_args, evaluate_worker)
 
-        if verbose > 1: print "\t\tClasses:",
-        for ii, pd in evaluator:
-            tl = eval.lb.transform(te_labels)[:, ii]
-            true_labels[ii].append(tl)
-            predictions[ii].append(pd)
-        if verbose > 1: print
+    if verbose > 1:
+        print "\t\tClasses:",
 
-    # Prepare labels.
+    true_labels = {}
+    predictions = {}
+
+    for ii, pd in evaluator:
+        tl = eval.lb.transform(te_labels)[:, ii]
+        true_labels[ii] = tl
+        predictions[ii] = pd
+
+    if verbose > 1:
+        print
+
+    preds_path = os.path.join(
+        CACHE_PATH, "%s_predictions_afim_%s_pi_%s_sqrt_nr_descs_%s_nagg_%d_part_%d.dat" % (
+            src_cfg, analytical_fim, False, False, nr_slices_to_aggregate, part))
+
+    with open(preds_path, 'w') as ff:
+        cPickle.dump(true_labels, ff)
+        cPickle.dump(predictions, ff)
+
+
+def evaluate_main(src_cfg, analytical_fim, nr_slices_to_aggregate, verbose):
+
+    dataset = Dataset(CFG[src_cfg]['dataset_name'], **CFG[src_cfg]['dataset_params'])
+    te_samples, _ = dataset.get_data('test')
+    nr_parts = int(np.ceil(float(len(te_samples)) / CFG[src_cfg]['samples_chunk']))
+
+    preds_path = os.path.join(
+        CACHE_PATH, "%s_predictions_afim_%s_pi_%s_sqrt_nr_descs_%s_nagg_%d_part_%s.dat" % (
+            src_cfg, analytical_fim, False, False, nr_slices_to_aggregate, "%d"))
+
+    true_labels = None
+
+    for part in xrange(nr_parts):
+
+        # Loads scores from file.
+        with open(preds_path % part, 'r') as ff:
+            tl = cPickle.load(ff)
+            pd = cPickle.load(ff)
+
+        # Prepares labels.
+        if true_labels is None:
+            true_labels = tl
+            predictions = pd
+        else:
+            for cls in true_labels.keys():
+                true_labels[cls] = np.hstack((true_labels[cls], tl[cls])).squeeze()
+                predictions[cls] = np.hstack((predictions[cls], pd[cls])).squeeze()
+
+    # Remove scores of duplicate samples.
+    str_te_samples = map(str, te_samples)
+    idxs = [str_te_samples.index(elem) for elem in set(str_te_samples)]
+
     for cls in true_labels.keys():
-        true_labels[cls] = np.hstack(true_labels[cls]).squeeze()
-        predictions[cls] = np.hstack(predictions[cls]).squeeze()
+        true_labels[cls] = true_labels[cls][idxs]
+        predictions[cls] = predictions[cls][idxs]
 
-    # Score results.
+    # Scores results.
     metric = CFG[src_cfg]['metric']
     if metric == 'average_precision':
         compute_average_precision(true_labels, predictions, verbose=verbose)
     elif metric == 'accuracy':
-        compute_accuracy(eval.lb, true_labels, predictions, verbose=verbose)
+        compute_accuracy(true_labels, predictions, verbose=verbose)
     else:
         assert False, "Unknown metric %s." % metric
 
@@ -572,6 +623,9 @@ def main():
     parser.add_argument(
         '-d', '--dataset', required=True, choices=CFG.keys(),
         help="which dataset (use `dummy` for debugging purposes).")
+    parser.add_argument(
+        '-t', '--task', choices=('predict', 'evaluate'), required=True,
+        help="what to do.")
     parser.add_argument(
         '--exact', action='store_true', default=False,
         help="uses exact normalizations at both train and test time.")
@@ -596,6 +650,9 @@ def main():
         '--nr_slices_to_aggregate', type=int, default=1,
         help="aggregates consecutive FVs.")
     parser.add_argument(
+        '--part', type=int,
+        help=("part of the test data; the batches are of 100 samples."))
+    parser.add_argument(
         '-v', '--verbose', action='count', help="verbosity level.")
     args = parser.parse_args()
 
@@ -611,11 +668,14 @@ def main():
     analytical_fim = not args.no_afim
     empirical_standardizations = [args.e_std_1, args.e_std_2]
 
-    evaluation(
-        args.dataset, tr_sqrt, empirical_standardizations, tr_l2_norm,
-        pred_type, analytical_fim,
-        nr_slices_to_aggregate=args.nr_slices_to_aggregate,
-        nr_threads=args.nr_threads, verbose=args.verbose)
+    if args.task == 'predict':
+        predict_main(
+            args.dataset, tr_sqrt, empirical_standardizations, tr_l2_norm,
+            pred_type, analytical_fim, part=args.part,
+            nr_slices_to_aggregate=args.nr_slices_to_aggregate,
+            nr_threads=args.nr_threads, verbose=args.verbose)
+    elif args.task == 'evaluate':
+        evaluate_main(args.dataset, analytical_fim, args.nr_slices_to_aggregate, verbose=args.verbose)
 
 
 if __name__ == '__main__':
