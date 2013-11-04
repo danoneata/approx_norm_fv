@@ -222,6 +222,7 @@ cdef class ApproxNormsBoundingFunction(Function):
     cdef int min_window
     cdef int max_window
     cdef list banned_intervals
+    cdef bint weight_by_slice_length
 
     def __init__(
         self,
@@ -232,7 +233,8 @@ cdef class ApproxNormsBoundingFunction(Function):
         np.ndarray[np.float64_t, ndim=2] slice_vw_counts,
         np.ndarray[np.float64_t, ndim=2] slice_vw_l2_norms,
         int min_window,
-        int max_window):
+        int max_window,
+        bint weight_by_slice_length):
 
         self.slice_vw_scores_no_integral = slice_vw_scores_no_integral
         self.slice_vw_l2_norms_no_integral = slice_vw_l2_norms_no_integral
@@ -243,6 +245,8 @@ cdef class ApproxNormsBoundingFunction(Function):
 
         self.min_window = min_window
         self.max_window = max_window
+
+        self.weight_by_slice_length = weight_by_slice_length
 
     def set_banned_intervals(self, banned_intervals):
         self.banned_intervals = banned_intervals
@@ -303,7 +307,8 @@ cdef class ApproxNormsBoundingFunction(Function):
             bound_sqrt_scores += (score_union[kk] + score_inter[kk]) / sqrt(counts_inter[kk])
             bound_approx_l2_norm += l2_norms_inter[kk] / counts_union[kk]
 
-        return bound_sqrt_scores / sqrt(bound_approx_l2_norm)
+        max_slice_length = uu[1] - uu[0] if self.weight_by_slice_length else 1.
+        return bound_sqrt_scores / sqrt(bound_approx_l2_norm) * max_slice_length
 
     cpdef np.ndarray _eval_integral(
         self,

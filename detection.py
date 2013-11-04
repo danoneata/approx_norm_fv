@@ -376,7 +376,7 @@ def approx_sliding_window(
 
 @timer
 def approx_sliding_window_ess(
-    slice_data, clf, deltas, selector, scalers, visual_word_mask):
+    slice_data, clf, deltas, selector, scalers, rescore, visual_word_mask):
 
     from ess import Bounds
     from ess import efficient_subwindow_search
@@ -417,7 +417,7 @@ def approx_sliding_window_ess(
 
     N = fisher_vectors.shape[0]
 
-    def bounding_function(bounds, banned_intervals):
+    def bounding_function(bounds, banned_intervals, weight_by_slice_length):
 
         union = bounds.get_union()
         inter = bounds.get_intersection()
@@ -470,7 +470,8 @@ def approx_sliding_window_ess(
             np.ma.array(l2_norms_inter, mask=idxs_inter) /
             np.ma.array(counts_union, mask=idxs_union)).filled(0))
 
-        return bound_sqrt_scores / np.sqrt(bound_approx_l2_norm)
+        max_slice_length = union[1] - union[0] if weight_by_slice_length else 1.
+        return bound_sqrt_scores / np.sqrt(bound_approx_l2_norm) * max_slice_length
 
     banned_intervals = []
     results = []
@@ -485,7 +486,7 @@ def approx_sliding_window_ess(
         ii += 1
 
         score, idxs, heap = efficient_subwindow_search(
-            lambda bounds: bounding_function(bounds, banned_intervals),
+            lambda bounds: bounding_function(bounds, banned_intervals, rescore),
             heap, blacklist=banned_intervals, verbose=2)
 
         banned_intervals.append(idxs)
@@ -507,7 +508,8 @@ def approx_sliding_window_ess(
 
 @timer
 def cy_approx_sliding_window_ess(
-    slice_data, clf, deltas, selector, scalers, visual_word_mask):
+    slice_data, clf, deltas, selector, scalers, rescore, visual_word_mask,
+    timings_file=None):
 
     import operator
 
@@ -656,7 +658,8 @@ def evaluation(
             },
             'sliding_window': approx_sliding_window_ess,
             'sliding_window_params': {
-                'visual_word_mask': visual_word_mask
+                'visual_word_mask': visual_word_mask,
+                'rescore': rescore,
             },
         },
         'cy_approx_ess': {
@@ -667,7 +670,9 @@ def evaluation(
             },
             'sliding_window': cy_approx_sliding_window_ess,
             'sliding_window_params': {
-                'visual_word_mask': visual_word_mask
+                'visual_word_mask': visual_word_mask,
+                'rescore': rescore,
+                'timings_file': timings_file,
             },
         },
     }
@@ -744,6 +749,9 @@ def main():
         '-a', '--algorithm', required=True,
         choices=('none', 'approx', 'approx_ess', 'cy_approx_ess', 'exact'),
         help="specifies the type of normalizations.")
+    parser.add_argument(
+        '--rescore', action='store_true', default=False,
+        help="rescores the slices according to their length.")
     parser.add_argument(
         '--containing', action='store_true', default=False,
         help=("considers the FVs corresponding to the dense trajectories that"
