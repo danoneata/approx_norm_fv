@@ -1,16 +1,12 @@
 """ Uses approximations for both signed square rooting and l2 normalization."""
 import argparse
 from collections import defaultdict
-from collections import namedtuple
 import cPickle
-import functools
 from multiprocessing import Pool
-from itertools import izip
 import numpy as np
 import pdb
 import os
 from scipy import sparse
-import tempfile
 
 # from ipdb import set_trace
 from joblib import Memory
@@ -25,9 +21,14 @@ from fisher_vectors.evaluation.utils import average_precision
 from fisher_vectors.model.utils import L2_normalize as exact_l2_normalize
 from fisher_vectors.model.utils import power_normalize
 
+from load_data import CACHE_PATH
+from load_data import CFG
 from load_data import approximate_signed_sqrt
 from load_data import load_kernels
 from load_data import load_sample_data
+from load_data import load_video_data
+from load_data import my_cacher
+from load_data import SliceData
 
 
 # TODO Possible improvements:
@@ -42,208 +43,11 @@ from load_data import load_sample_data
 # [x] Parallelize per-class evaluation.
 
 
-SliceData = namedtuple('SliceData', ['fisher_vectors', 'counts', 'nr_descriptors'])
-
-   
-hmdb_stab_dict = {
-    'hmdb_split%d.stab' % ii :{
-        'dataset_name': 'hmdb_split%d' % ii,
-        'dataset_params': {
-            'ip_type': 'dense5.track15mbh',
-            'nr_clusters': 256,
-            'suffix': '.per_slice.delta_15.stab.fold_%d' % ii,
-        },
-        'eval_name': 'hmdb',
-        'eval_params': {
-        },
-        'metric': 'accuracy',
-    } for ii in xrange(1, 4)}
-
-
-cache_dir = os.path.expanduser('~/scratch2/tmp')
-CFG = {
-    'trecvid11_devt': {
-        'dataset_name': 'trecvid12',
-        'dataset_params': {
-            'ip_type': 'dense5.track15mbh',
-            'nr_clusters': 256,
-            'suffix': '.per_slice.small.delta_60.skip_1',
-        },
-        'eval_name': 'trecvid12',
-        'eval_params': {
-            'split': 'devt',
-        },
-        'metric': 'average_precision',
-    },
-    'hollywood2':{
-        'dataset_name': 'hollywood2',
-        'dataset_params': {
-            'ip_type': 'dense5.track15mbh',
-            'nr_clusters': 256,
-            'suffix': '.per_slice.delta_60',
-        },
-        'eval_name': 'hollywood2',
-        'eval_params': {
-        },
-        'metric': 'average_precision',
-    },
-    'hollywood2.delta_30':{
-        'dataset_name': 'hollywood2',
-        'dataset_params': {
-            'ip_type': 'dense5.track15mbh',
-            'nr_clusters': 256,
-            'suffix': '.per_slice.delta_30',
-        },
-        'eval_name': 'hollywood2',
-        'eval_params': {
-        },
-        'metric': 'average_precision',
-    },
-    'hollywood2.delta_5.all_descs':{
-        'dataset_name': 'hollywood2',
-        'dataset_params': {
-            'ip_type': 'dense5.track15hog,hof,mbh',
-            'nr_clusters': 256,
-            'suffix': '.delta_5',
-            'separate_pca': True,
-        },
-        'eval_name': 'hollywood2',
-        'eval_params': {
-        },
-        'metric': 'average_precision',
-    },
-    'dummy': {
-        'dataset_name': '',
-        'dataset_params': {
-        },
-        'eval_name': 'hollywood2',
-        'eval_params': {
-        },
-        'metric': 'accuracy',
-    },
-    'hmdb_split1':{
-        'dataset_name': 'hmdb_split1',
-        'dataset_params': {
-            'ip_type': 'dense5.track15mbh',
-            'nr_clusters': 256,
-            'suffix': '.per_slice.delta_30',
-        },
-        'eval_name': 'hmdb',
-        'eval_params': {
-        },
-        'metric': 'accuracy',
-    },
-    'cc':{
-        'dataset_name': 'cc',
-        'dataset_params': {
-            'ip_type': 'dense5.track15mbh',
-            'nr_clusters': 128,
-            'suffix': '',
-        },
-        'eval_name': 'cc',
-        'eval_params': {
-        },
-        'metric': 'average_precision',
-        'chunk_size': 30,
-    },
-    'cc.no_stab':{
-        'dataset_name': 'cc',
-        'dataset_params': {
-            'ip_type': 'dense5.track15mbh',
-            'nr_clusters': 128,
-            'suffix': '.delta_5.no_stab',
-        },
-        'eval_name': 'cc',
-        'eval_params': {
-        },
-        'metric': 'average_precision',
-        'chunk_size': 5,
-    },
-    'cc.stab':{
-        'dataset_name': 'cc',
-        'dataset_params': {
-            'ip_type': 'dense5.track15mbh',
-            'nr_clusters': 128,
-            'suffix': '.stab',
-        },
-        'eval_name': 'cc',
-        'eval_params': {
-        },
-        'metric': 'average_precision',
-        'chunk_size': 1,
-    },
-}
-CFG.update(hmdb_stab_dict)
-
-
 LOAD_SAMPLE_DATA_PARAMS = {
     'pi_derivatives' : False,
     'sqrt_nr_descs'  : False,
     'return_info'    : True,
 }
-
-
-def my_cacher(*args):
-
-    def loader(file, format):
-        if format in ('cp', 'cPickle'):
-            result = cPickle.load(file)
-        elif format in ('np', 'numpy'):
-            result = np.load(file)
-        else:
-            assert False
-        return result
-
-    def dumper(file, result, format):
-        if format in ('cp', 'cPickle'):
-            cPickle.dump(result, file)
-        elif format in ('np', 'numpy'):
-            np.save(file, result)
-        else:
-            assert False
-
-    store_format = args
-
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapped(*args, **kwargs):
-            outfile = kwargs.get('outfile', tempfile.mkstemp()[1])
-            if os.path.exists(outfile):
-                with open(outfile, 'r') as ff:
-                    return [loader(ff, sf) for sf in store_format]
-            else:
-                result = func(*args, **kwargs)
-                with open(outfile, 'w') as ff:
-                    for rr, sf in izip(result, store_format):
-                        dumper(ff, rr, sf)
-                return result
-        return wrapped
-
-    return decorator
-
-
-@my_cacher('np', 'cp', 'np', 'np', 'cp', 'cp')
-def load_dummy_data(seed, store_format=None, outfile=None):
-    N_SAMPLES = 100
-    N_CENTERS = 5
-    N_FEATURES = 20
-    K, D = 2, 5
-
-    te_data, te_labels = make_blobs(
-        n_samples=N_SAMPLES, centers=N_CENTERS,
-        n_features=N_FEATURES, random_state=seed)
-
-    te_slice_data.video_mask = sparse.csr_matrix(np.eye(N_SAMPLES))
-    te_visual_word_mask = build_visual_word_mask(D, K)
-
-    np.random.seed(seed)
-    te_counts = np.random.rand(N_SAMPLES, K)
-    te_l2_norms = te_data ** 2 * te_visual_word_mask
-    te_labels = list(te_labels)
-
-    return (
-        te_data, te_labels, te_counts, te_l2_norms, te_video_mask,
-        te_visual_word_mask)
 
 
 def compute_weights(clf, xx, tr_std=None):
@@ -395,7 +199,7 @@ def sum_and_scale_by_squared(data, coef, mask=None):
     return sum_by(data * (coef_ ** 2), mask=mask) / sum_by(coef_, mask=mask) ** 2
 
 
-#@my_cacher('np')
+@my_cacher('np')
 def load_corrected_norms(
     dataset, samples, nr_slices_to_aggregate, scalers, analytical_fim,
     verbose=0, outfile=None):
@@ -437,44 +241,6 @@ def load_corrected_norms(
             print '%5d %5d %s' % (jj, fv.shape[0], sample.movie)
 
     return [tr_l2_norms[:jj]]
-
-
-@my_cacher('np', 'np', 'cp')
-def load_video_data(dataset, samples, analytical_fim, verbose=0, outfile=None):
-
-    jj = 0
-    N = len(samples)
-    D, K = dataset.D, dataset.VOC_SIZE
-
-    tr_video_data = np.zeros((N, 2 * D * K), dtype=np.float32)
-    tr_video_counts = np.zeros((N, K), dtype=np.float32)
-    tr_video_labels = []
-    tr_video_names = []
-
-    for sample in samples:
-
-        fv, ii, cc, _ = load_sample_data(
-            dataset, sample, analytical_fim=analytical_fim,
-            **LOAD_SAMPLE_DATA_PARAMS)
-
-        if len(fv) == 0 or str(sample) in tr_video_names:
-            continue
-
-        nd = ii['nr_descs']
-        nd = nd[nd != 0][:, np.newaxis]
-        ll = ii['label']
-
-        tr_video_data[jj] = (fv * nd).sum(axis=0) / nd.sum()
-        tr_video_counts[jj] = (cc * nd).sum(axis=0) / nd.sum()
-        tr_video_labels.append(ll)
-        tr_video_names.append(str(sample))
-
-        jj += 1
-
-        if verbose:
-            print '%5d %5d %s' % (jj, fv.shape[0], sample.movie)
-
-    return tr_video_data[:jj], tr_video_counts[:jj], tr_video_labels[:jj]
 
 
 @my_cacher('np', 'np', 'np', 'np', 'cp', 'cp')

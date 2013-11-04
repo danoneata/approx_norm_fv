@@ -5,6 +5,8 @@ import numpy as np
 from dataset import Dataset
 from fisher_vectors.evaluation import Evaluation
 
+from load_data import CACHE_PATH
+from load_data import CFG
 from load_data import load_kernels
 
 
