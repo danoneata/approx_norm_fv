@@ -8,6 +8,7 @@ import pdb
 import os
 from scipy import sparse
 import sys
+import time
 
 from sklearn.preprocessing import Scaler
 
@@ -23,6 +24,10 @@ from load_data import load_kernels
 from load_data import load_sample_data
 
 from result_file_functions import get_det_ap
+from result_file_functions import get_det_pr
+
+from load_data import CFG
+from ssqrt_l2_approx import LOAD_SAMPLE_DATA_PARAMS
 
 from ssqrt_l2_approx import approximate_video_scores
 from ssqrt_l2_approx import build_slice_agg_mask
@@ -38,26 +43,32 @@ from ssqrt_l2_approx import sum_by
 from ssqrt_l2_approx import visual_word_l2_norm
 from ssqrt_l2_approx import visual_word_scores
 
-from ssqrt_l2_approx import CFG
-from ssqrt_l2_approx import LOAD_SAMPLE_DATA_PARAMS
+from test_approx_ess import non_maxima_supression
 
 
 # TODO Things to improve
 # [x] Check if frames are contiguous. If not treat them specifically.
 # [x] Mask with 1, -1 and integral quantities.
-# [ ] Write fast ESS for approximate norms in Cython.
+# [x] Write fast ESS for approximate norms in Cython.
 # [ ] Remove duplicate code from `approx_ess` and `cy_approx_ess`.
 
+CVPR_XPS = True
 
 TRACK_LEN = 15
 NULL_CLASS_IDX = 0
+
+MOVIE = 'cac.mpg'
+SAMPID = '%s-frames-%d-%d'
+RESULT_PATH = '/home/lear/oneata/tmp/%s_%s_%d_%d_%s.dat'
+
 SliceData = namedtuple(
     'SliceData', ['fisher_vectors', 'counts', 'nr_descriptors', 'begin_frames',
                   'end_frames'])
 
+ITERATION_TIMINGS = []
+
 
 def timer(func):
-    import time
     def timed_func(*args, **kwargs):
         start = time.time()
         out = func(*args, **kwargs)
@@ -76,8 +87,7 @@ def load_data_delta_0(
     dataset, movie, part, class_idx, outfile=None, delta_0=30, verbose=0):
     """ Loads Fisher vectors for the test data for detection datasets. """
 
-    D = 64
-    K = dataset.VOC_SIZE
+    D, K = dataset.D, dataset.VOC_SIZE
     class_name = dataset.IDX2CLS[class_idx]
     class_limits = dataset.CLASS_LIMITS[movie][class_name][part]
 
@@ -268,12 +278,17 @@ def exact_sliding_window(
 
     # Multiply by the number of descriptors.
     fisher_vectors = slice_data.fisher_vectors * nr_descriptors_T
+    counts = slice_data.counts * nr_descriptors_T
+
     begin_frames, end_frames = slice_data.begin_frames, slice_data.end_frames
     N = fisher_vectors.shape[0]
 
     if selector.integral:
         fisher_vectors = integral(fisher_vectors)
         nr_descriptors_T = integral(nr_descriptors_T)
+
+    if selector.integral and sqrt_type == 'approx':
+        counts = integral(counts)
 
     for delta in deltas:
 
@@ -295,10 +310,17 @@ def exact_sliding_window(
         # Normalize aggregated data.
         if scalers[0] is not None:
             agg_fisher_vectors = scalers[0].transform(agg_fisher_vectors)
-        if sqrt_type != 'none':
+        if sqrt_type == 'exact':
             agg_fisher_vectors = power_normalize(agg_fisher_vectors, 0.5)
+        if sqrt_type == 'approx':
+            agg_counts = (
+                sum_by(counts, mask) /
+                sum_by(nr_descriptors_T, mask))
+            agg_fisher_vectors = approximate_signed_sqrt(
+                agg_fisher_vectors, agg_counts, pi_derivatives=False)
         if scalers[1] is not None:
             agg_fisher_vectors = scalers[1].transform(agg_fisher_vectors)
+
         # More efficient, to apply L2 on the scores than on the FVs.
         l2_norms = (
             compute_L2_normalization(agg_fisher_vectors)
@@ -511,6 +533,8 @@ def cy_approx_sliding_window_ess(
     slice_data, clf, deltas, selector, scalers, rescore, visual_word_mask,
     timings_file=None):
 
+    start = time.time()
+
     import operator
 
     from ess import Bounds
@@ -567,11 +591,13 @@ def cy_approx_sliding_window_ess(
         slice_vw_scores_no_integral, slice_vw_l2_norms_no_integral,
         pos_slice_vw_scores, neg_slice_vw_scores, slice_vw_counts,
         slice_vw_l2_norms, min_window=min(deltas) / selector.chunk,
-        max_window=max(deltas) / selector.chunk)
+        max_window=max(deltas) / selector.chunk, weight_by_slice_length=rescore)
+
+    ITERATION_TIMINGS.append((-1, time.time() - start))
 
     while True:
 
-        ii += 1
+        start = time.time()
 
         bounding_function.set_banned_intervals(banned_intervals)
         score, idxs, heap = cy_efficient_subwindow_search(
@@ -591,6 +617,15 @@ def cy_approx_sliding_window_ess(
 
         covered += idxs[1] - idxs[0]
 
+        ITERATION_TIMINGS.append((ii, time.time() - start))
+
+        ii += 1
+
+    if timings_file is not None:
+        with open(timings_file, 'w') as ff:
+            for ii, tt in ITERATION_TIMINGS:
+                ff.write("%4d %f\n" % (ii, tt))
+
     return results
 
 
@@ -604,16 +639,15 @@ def save_results(dataset, class_idx, adrien_results, deltas=None):
             cPickle.dump(list(res), ff)
 
 
+@my_cacher('cp')
 def evaluation(
     algo_type, src_cfg, class_idx, stride, deltas, no_integral, containing,
-    do_save_results=False, verbose=0):
+    rescore, timings_file, outfile=None, verbose=0):
 
     dataset = Dataset(CFG[src_cfg]['dataset_name'], **CFG[src_cfg]['dataset_params'])
-    D, K = 64, dataset.VOC_SIZE
+    D, K = dataset.D, dataset.VOC_SIZE
     visual_word_mask = build_visual_word_mask(D, K)
 
-    MOVIE = 'cac.mpg'
-    SAMPID = '%s-frames-%d-%d'
     ALGO_PARAMS = {
         'none': {
             'train_params': {
@@ -627,16 +661,52 @@ def evaluation(
                 'sqrt_type': 'none'
             },
         },
+        'exact_L2': {
+            'train_params': {
+                'l2_norm_type': 'exact',
+                'empirical_standardizations': [False, False],
+                'sqrt_type': 'none'
+            },
+            'sliding_window': exact_sliding_window,
+            'sliding_window_params': {
+                'l2_norm_type': 'exact',
+                'sqrt_type': 'none'
+            },
+        },
+        'exact_sqrt': {
+            'train_params': {
+                'l2_norm_type': 'none',
+                'empirical_standardizations': [False, False],
+                'sqrt_type': 'exact'
+            },
+            'sliding_window': exact_sliding_window,
+            'sliding_window_params': {
+                'l2_norm_type': 'none',
+                'sqrt_type': 'exact'
+            },
+        },
         'exact': {
             'train_params': {
                 'l2_norm_type': 'exact',
-                'empirical_standardizations': [False, True],
+                'empirical_standardizations': [False, False],
                 'sqrt_type': 'exact'
             },
             'sliding_window': exact_sliding_window,
             'sliding_window_params': {
                 'l2_norm_type': 'exact',
                 'sqrt_type': 'exact'
+            },
+        },
+        'approx_sqrt_exact_L2': {
+            'train_params': {
+                'l2_norm_type': 'exact',
+                'empirical_standardizations': [False, True],
+                'sqrt_type': 'approx'
+            },
+            'sliding_window': exact_sliding_window,
+            'sliding_window_params': {
+                'l2_norm_type': 'exact',
+                'sqrt_type': 'approx'
             },
         },
         'approx': {
@@ -716,6 +786,9 @@ def evaluation(
             dataset, MOVIE, part, class_idx, delta_0=chunk_size,
             outfile=te_outfile))
 
+        if verbose > 1:
+            print "Aggregating data."
+
         # Aggregate data into non-overlapping chunks of size `base_chunk_size`.
         N = te_slice_data.fisher_vectors.shape[0]
         agg_slice_data = aggregate(
@@ -723,31 +796,28 @@ def evaluation(
             non_overlapping_selector.get_mask(N),
             non_overlapping_selector.get_frame_idxs(N))
 
+        if verbose > 1:
+            print "Starting the sliding window", algo_type
+
         results += ALGO_PARAMS[algo_type]['sliding_window'](
             agg_slice_data, clf, deltas, overlapping_selector, tr_stds,
             **ALGO_PARAMS[algo_type]['sliding_window_params'])
 
-    gt_path = os.path.join(dataset.FL_DIR, 'keyframes_test_%s.list' % class_name)
-    adrien_results = [
-        (SampID(SAMPID % (MOVIE, bf, ef)), score) for bf, ef, score in results]
-    ap = get_det_ap(adrien_results, gt_path, 'OV20', 'OV20')
-
-    if do_save_results:
-        save_results(dataset, class_idx, adrien_results, deltas)
-
-    print "%10s %.2f" % (class_name, 100 * ap)
+    return [results]
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Approximating the normalizations for the detection task.")
 
+    detection_dataset = [dd for dd in CFG.keys() if dd.startswith('cc')]
     parser.add_argument(
-        '-d', '--dataset', required=True, choices=('cc', 'cc.stab', 'cc.no_stab'),
+        '-d', '--dataset', required=True, choices=detection_dataset,
         help="which dataset.")
     parser.add_argument(
         '-a', '--algorithm', required=True,
-        choices=('none', 'approx', 'approx_ess', 'cy_approx_ess', 'exact'),
+        choices=('none', 'approx', 'approx_ess', 'cy_approx_ess', 'exact',
+                 'exact_sqrt', 'exact_L2', 'approx_sqrt_exact_L2'),
         help="specifies the type of normalizations.")
     parser.add_argument(
         '--rescore', action='store_true', default=False,
@@ -769,6 +839,12 @@ def main():
     parser.add_argument('--begin', type=int, help="smallest slice length.")
     parser.add_argument('--end', type=int, help="largest slice length.")
     parser.add_argument(
+        '--timings_file', default=None,
+        help="where to store the iteration timings (only for `cy_approx_ess`.")
+    parser.add_argument(
+        '--results_file', default=None,
+        help="where to store the scored slices.")
+    parser.add_argument(
         '--save_results', action='store_true', default=False,
         help="dumps results to disk in seperate files for each delta.")
     parser.add_argument(
@@ -777,10 +853,62 @@ def main():
     args = parser.parse_args()
     deltas = range(args.begin, args.end + args.delta, args.delta)
 
-    evaluation(
+    if args.timings_file is None and args.algorithm == 'cy_approx_ess':
+         args.timings_file = (
+             '/home/lear/oneata/data/cc/results/cy_approx_ess_class_%d_timings.txt'
+             % args.class_idx)
+
+    if args.results_file is None:
+        args.results_file = RESULT_PATH % (
+            args.algorithm,
+            args.dataset,
+            args.class_idx,
+            args.stride,
+            '_'.join(map(str, deltas)))
+
+    results = evaluation(
         args.algorithm, args.dataset, args.class_idx, args.stride, deltas,
-        no_integral=args.no_integral, containing=args.containing,
-        do_save_results=args.save_results, verbose=args.verbose)
+        rescore=args.rescore, no_integral=args.no_integral,
+        containing=args.containing, verbose=args.verbose,
+        outfile=args.results_file, timings_file=args.timings_file)[0]
+
+    if args.rescore and 'ess' not in args.algorithm:
+        results = [(bf, ef, score * (ef - bf)) for bf, ef, score in results]
+
+    # I do the NMS myself and skip it in Adrien's code.
+    if 'ess' not in args.algorithm:  # ESS does 0-NMS automatically.
+        results = non_maxima_supression(results, nms_overlap=0)
+
+    adrien_results = [
+        (SampID(SAMPID % (MOVIE, bf, ef)), score)
+        for bf, ef, score in results]
+
+    dataset = Dataset(
+        CFG[args.dataset]['dataset_name'],
+        **CFG[args.dataset]['dataset_params'])
+
+    if args.save_results:
+        save_results(dataset, args.class_idx, adrien_results, args.deltas)
+
+    class_name = dataset.IDX2CLS[args.class_idx]
+    gt_path = os.path.join(dataset.FL_DIR, 'keyframes_test_%s.list' % class_name)
+
+    ap = get_det_ap(adrien_results, gt_path, 'OV20', nmscrit='OV00')
+
+    if CVPR_XPS:
+        # Save the precision, recall values.
+        recall, precision = get_det_pr(adrien_results, gt_path, 'OV20', 'OV00')
+        oo = '/home/lear/oneata/tmp/pr_%s_%s_class_%d_strid_%d_delta_%s.dat' % (
+            args.algorithm,
+            args.dataset,
+            args.class_idx,
+            args.stride,
+            '_'.join(map(str, deltas)))
+        with open(oo, 'w') as ff:
+            for rr, pp in zip(recall, precision):
+                print >> ff, pp, rr
+
+    print "%10s %.2f" % (class_name, 100 * ap)
 
 
 if __name__ == '__main__':
