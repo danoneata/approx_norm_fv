@@ -772,36 +772,39 @@ def evaluation(
     eval.fit(tr_kernel, binary_labels)
     clf = compute_weights(eval.get_classifier(), class_tr_video_data)
 
-    results = []
+    results = {}
     class_name = dataset.IDX2CLS[class_idx]
     non_overlapping_selector = NonOverlappingSelector(base_chunk_size / chunk_size)
     overlapping_selector = OverlappingSelector(
         base_chunk_size, stride, containing,
         integral=(not no_integral))
-    for part in xrange(len(dataset.CLASS_LIMITS[MOVIE][class_name])):
-        te_outfile = (
-            '/scratch2/clear/oneata/tmp/joblib/%s_cls%d_part%d_test.dat' %
-            (src_cfg, class_idx, part))
-        te_slice_data = SliceData(*load_data_delta_0(
-            dataset, MOVIE, part, class_idx, delta_0=chunk_size,
-            outfile=te_outfile))
 
-        if verbose > 1:
-            print "Aggregating data."
+    for movie in dataset.TE_MOVIES:
+        results[movie] = []
+        for part in xrange(len(dataset.CLASS_LIMITS[movie][class_name])):
+            te_outfile = (
+                '/scratch2/clear/oneata/tmp/joblib/%s_cls%d_movie%s_part%d_test.dat' %
+                (src_cfg, class_idx, movie, part))
+            te_slice_data = SliceData(*load_data_delta_0(
+                dataset, movie, part, class_idx, delta_0=chunk_size,
+                outfile=te_outfile))
 
-        # Aggregate data into non-overlapping chunks of size `base_chunk_size`.
-        N = te_slice_data.fisher_vectors.shape[0]
-        agg_slice_data = aggregate(
-            te_slice_data,
-            non_overlapping_selector.get_mask(N),
-            non_overlapping_selector.get_frame_idxs(N))
+            if verbose > 1:
+                print "Aggregating data."
 
-        if verbose > 1:
-            print "Starting the sliding window", algo_type
+            # Aggregate data into non-overlapping chunks of size `base_chunk_size`.
+            N = te_slice_data.fisher_vectors.shape[0]
+            agg_slice_data = aggregate(
+                te_slice_data,
+                non_overlapping_selector.get_mask(N),
+                non_overlapping_selector.get_frame_idxs(N))
 
-        results += ALGO_PARAMS[algo_type]['sliding_window'](
-            agg_slice_data, clf, deltas, overlapping_selector, tr_stds,
-            **ALGO_PARAMS[algo_type]['sliding_window_params'])
+            if verbose > 1:
+                print "Starting the sliding window", algo_type
+
+            results[movie] += ALGO_PARAMS[algo_type]['sliding_window'](
+                agg_slice_data, clf, deltas, overlapping_selector, tr_stds,
+                **ALGO_PARAMS[algo_type]['sliding_window_params'])
 
     return [results]
 
@@ -875,15 +878,22 @@ def main():
         outfile=args.results_file, timings_file=args.timings_file)[0]
 
     if args.rescore and 'ess' not in args.algorithm:
-        results = [(bf, ef, score * (ef - bf)) for bf, ef, score in results]
+        results = {
+            movie: [
+                (bf, ef, score * (ef - bf))
+                for bf, ef, score in movie_results]
+            for movie, movie_results in results.iteritems()}
 
     # I do the NMS myself and skip it in Adrien's code.
     if 'ess' not in args.algorithm:  # ESS does 0-NMS automatically.
-        results = non_maxima_supression(results, nms_overlap=0)
+        results = {
+            movie: non_maxima_supression(movie_results, nms_overlap=0)
+            for movie, movie_results in results.iteritems()}
 
     adrien_results = [
-        (SampID(SAMPID % (MOVIE, bf, ef)), score)
-        for bf, ef, score in results]
+        (SampID(SAMPID % (movie, bf, ef)), score)
+        for movie, movie_results in results.iteritems()
+        for bf, ef, score in movie_results]
 
     dataset = Dataset(
         CFG[args.dataset]['dataset_name'],
