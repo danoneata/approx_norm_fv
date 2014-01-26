@@ -810,7 +810,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Approximating the normalizations for the detection task.")
 
-    detection_dataset = [dd for dd in CFG.keys() if dd.startswith('cc')]
+    detection_dataset = [
+        dd for dd in CFG.keys()
+        if dd.startswith('cc') or dd.startswith('duch09')]
     parser.add_argument(
         '-d', '--dataset', required=True, choices=detection_dataset,
         help="which dataset.")

@@ -191,6 +191,20 @@ CFG = {
         'metric': 'average_precision',
         'chunk_size': 5,
     },
+    'duch09.delta_5.all_descs':{
+        'dataset_name': 'duch09',
+        'dataset_params': {
+            'ip_type': 'dense5.track15hog,hof,mbh',
+            'nr_clusters': 256,
+            'suffix': '.delta_5.separate_pca',
+            'separate_pca': True,
+        },
+        'eval_name': 'duch09',
+        'eval_params': {
+        },
+        'metric': 'average_precision',
+        'chunk_size': 5,
+    },
 }
 
 CFG.update(hmdb_stab_dict)
