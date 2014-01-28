@@ -191,6 +191,19 @@ CFG = {
         'metric': 'average_precision',
         'chunk_size': 5,
     },
+    'duch09':{
+        'dataset_name': 'duch09',
+        'dataset_params': {
+            'ip_type': 'dense5.track15mbh',
+            'nr_clusters': 128,
+            'suffix': '',
+        },
+        'eval_name': 'cc',
+        'eval_params': {
+        },
+        'metric': 'average_precision',
+        'chunk_size': 30,
+    },
     'duch09.delta_5.all_descs':{
         'dataset_name': 'duch09',
         'dataset_params': {
@@ -199,7 +212,7 @@ CFG = {
             'suffix': '.delta_5.separate_pca',
             'separate_pca': True,
         },
-        'eval_name': 'duch09',
+        'eval_name': 'cc',
         'eval_params': {
         },
         'metric': 'average_precision',
