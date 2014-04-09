@@ -127,12 +127,20 @@ def visual_word_scores(fisher_vectors, weights, bias, visual_word_mask):
     return (- fisher_vectors * weights) * visual_word_mask  # NxK
 
 
+def compute_approx_l2_normalization(l2_norms, counts):
+    zero_idxs = counts == 0
+    masked_norms = np.ma.masked_array(l2_norms, zero_idxs)
+    masked_counts = np.ma.masked_array(counts, zero_idxs)
+    masked_result = masked_norms / masked_counts
+    return np.sum(masked_result.filled(0), axis=1)
+
+
 def approx_l2_normalize(data, l2_norms, counts):
     zero_idxs = counts == 0
     masked_norms = np.ma.masked_array(l2_norms, zero_idxs)
     masked_counts = np.ma.masked_array(counts, zero_idxs)
     masked_result = masked_norms / masked_counts
-    approx_l2_norm = np.sum(masked_result.filled(0), axis=1)
+    approx_l2_norm = compute_approx_l2_normalization(l2_norms, counts)
     return data / np.sqrt(approx_l2_norm[:, np.newaxis])
 
 
