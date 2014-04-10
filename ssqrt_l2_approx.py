@@ -352,11 +352,8 @@ def compute_accuracy(true_labels, predictions, verbose=0):
 
 
 def evaluate_worker((
-    cls, eval, tr_data, tr_scalers, slice_data, video_mask, visual_word_mask,
+    cls, weight, bias, tr_scalers, slice_data, video_mask, visual_word_mask,
     prediction_type, verbose)):
-
-    clf = eval.get_classifier(cls)
-    weight, bias = compute_weights(clf, tr_data, tr_std=None)
 
     if prediction_type == 'approx':
         slice_vw_counts = slice_data.counts * slice_data.nr_descriptors[:, np.newaxis]
@@ -501,6 +498,9 @@ def predict_main(
 
     eval = Evaluation(CFG[src_cfg]['eval_name'], **CFG[src_cfg]['eval_params'])
     eval.fit(tr_kernel, tr_video_labels)
+    clfs = [
+        compute_weights(eval.get_classifier(cls), tr_video_data, tr_std=None)
+        for ii in xrange(eval.nr_classes)]
 
     if verbose:
         print "Loading test data."
@@ -550,7 +550,7 @@ def predict_main(
                     agg_slice_data.fisher_vectors))
 
     eval_args = [
-        (ii, eval, tr_video_data, tr_scalers, agg_slice_data, video_mask,
+        (ii, clfs[ii][0], clfs[ii][1], tr_scalers, agg_slice_data, video_mask,
          visual_word_mask, prediction_type, verbose)
         for ii in xrange(eval.nr_classes)]
     evaluator = threads.ParallelIter(nr_threads, eval_args, evaluate_worker)
