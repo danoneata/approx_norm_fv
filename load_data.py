@@ -329,16 +329,16 @@ def my_cacher(*args):
 @my_cacher('np', 'np', 'cp')
 def load_video_data(
     dataset, samples, verbose=0, outfile=None, analytical_fim=True,
-    pi_derivatives=False, sqrt_nr_descs=False, spm=None, bin=None,
-    encoding='fv'):
+    pi_derivatives=False, sqrt_nr_descs=False, spm=None, encoding='fv'):
 
     jj = 0
     N = len(samples)
     D, K = dataset.D, dataset.VOC_SIZE
     FV_DIM = 2 * K * D if encoding == 'fv' else 2 * 3 * K
+    N_BINS = np.prod(spm)
 
-    tr_video_data = np.zeros((N, FV_DIM), dtype=np.float32)
-    tr_video_counts = np.zeros((N, K), dtype=np.float32)
+    tr_video_data = np.zeros((N, N_BINS * FV_DIM), dtype=np.float32)
+    tr_video_counts = np.zeros((N, N_BINS * K), dtype=np.float32)
     tr_video_labels = []
     tr_video_names = []
 
@@ -365,7 +365,7 @@ def load_video_data(
         X, C, nn = prepare_binned_data(X, C, nn)
         Xagg = (X * nn).sum(axis=0) / nn.sum(axis=0)
         Cagg = (C * nn).sum(axis=0) / nn.sum(axis=0)
-        return Xagg[bin], Cagg[bin]
+        return Xagg.flatten(), Cagg.flatten()
 
     def aggregate_spm_t2(X, C, nn):
         X, C, nn = prepare_binned_data(X, C, nn)
@@ -376,10 +376,11 @@ def load_video_data(
         Cagg = np.vstack([
             (C * nn)[: NS / 2].sum(axis=(0, 1)) / nn[: NS / 2].sum(axis=(0, 1)),
             (C * nn)[NS / 2 :].sum(axis=(0, 1)) / nn[NS / 2 :].sum(axis=(0, 1))])
-        return Xagg[bin], Cagg[bin]
+        return Xagg.flatten(), Cagg.flatten()
 
     AGG = {
         None: aggregate_1,
+        (1, -1, -1): aggregate_1, # FIXME Hack.
         (1, 1, 1): aggregate_spm_1,
         (1, 1, 2): aggregate_spm_t2,
         (1, 3, 1): aggregate_spm_h3,
