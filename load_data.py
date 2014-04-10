@@ -83,6 +83,38 @@ CFG = {
         },
         'metric': 'average_precision',
     },
+    'hollywood2.delta_5.small':{
+        'dataset_name': 'hollywood2',
+        'dataset_params': {
+            'ip_type': 'dense5.track15mbh',
+            'nr_clusters': 50,
+            'suffix': '.per_slice.delta_5',
+            'tmp_suffix': '_spm131',
+        },
+        'samples_chunk': 25,
+        'eval_name': 'hollywood2',
+        'spms': [(1, 1, 1), (1, 1, 2), (1, 3, 1)],
+        'encodings': ['fv', 'sfv'],
+        'eval_params': {
+        },
+        'metric': 'average_precision',
+    },
+    'hollywood2.delta_5':{
+        'dataset_name': 'hollywood2',
+        'dataset_params': {
+            'ip_type': 'dense5.track15mbh',
+            'nr_clusters': 1000,
+            'suffix': '.per_slice.delta_5',
+            'tmp_suffix': '_spm131',
+        },
+        'samples_chunk': 25,
+        'eval_name': 'hollywood2',
+        'spms': [(1, 1, 1), (1, 1, 2), (1, 3, 1)],
+        'encodings': ['fv', 'sfv'],
+        'eval_params': {
+        },
+        'metric': 'average_precision',
+    },
     'hollywood2.delta_30':{
         'dataset_name': 'hollywood2',
         'dataset_params': {
