@@ -1,8 +1,11 @@
+from collections import defaultdict
 from collections import namedtuple
 import cPickle
 import functools
 from itertools import izip
+from itertools import product
 import os
+import pdb
 import tempfile
 
 import matplotlib.pyplot as plt
@@ -13,6 +16,8 @@ from sklearn.preprocessing import Scaler
 from yael import yael
 
 from fisher_vectors.model.fv_model import FVModel
+from fisher_vectors.model.sfv_model import SFVModel
+
 from fisher_vectors.model.utils import power_normalize
 from fisher_vectors.model.utils import L2_normalize
 from fisher_vectors.model.utils import sstats_to_sqrt_features
@@ -324,31 +329,80 @@ def my_cacher(*args):
 @my_cacher('np', 'np', 'cp')
 def load_video_data(
     dataset, samples, verbose=0, outfile=None, analytical_fim=True,
-    pi_derivatives=False, sqrt_nr_descs=False):
+    pi_derivatives=False, sqrt_nr_descs=False, spm=None, bin=None,
+    encoding='fv'):
 
     jj = 0
     N = len(samples)
     D, K = dataset.D, dataset.VOC_SIZE
+    FV_DIM = 2 * K * D if encoding == 'fv' else 2 * 3 * K
 
-    tr_video_data = np.zeros((N, 2 * D * K), dtype=np.float32)
+    tr_video_data = np.zeros((N, FV_DIM), dtype=np.float32)
     tr_video_counts = np.zeros((N, K), dtype=np.float32)
     tr_video_labels = []
     tr_video_names = []
 
+    def prepare_binned_data(X, C, nn):
+        nn = nn.T
+        X = X.reshape(nn.shape[0], nn.shape[1], FV_DIM)
+        C = C.reshape(nn.shape[0], nn.shape[1], K)
+        return X, C, nn
+
+    def aggregate_1(X, C, nn):
+        nn = nn[nn != 0][:, np.newaxis]
+        Xagg = (X * nn).sum(axis=0) / nn.sum()
+        Cagg = (C * nn).sum(axis=0) / nn.sum()
+        return Xagg, Cagg
+
+    # Treat differently the data stored from spatial pyramids.
+    def aggregate_spm_1(X, C, nn):
+        X, C, nn = prepare_binned_data(X, C, nn)
+        Xagg = (X * nn).sum(axis=(0, 1)) / nn.sum(axis=(0, 1))
+        Cagg = (C * nn).sum(axis=(0, 1)) / nn.sum(axis=(0, 1))
+        return Xagg, Cagg
+
+    def aggregate_spm_h3(X, C, nn):
+        X, C, nn = prepare_binned_data(X, C, nn)
+        Xagg = (X * nn).sum(axis=0) / nn.sum(axis=0)
+        Cagg = (C * nn).sum(axis=0) / nn.sum(axis=0)
+        return Xagg[bin], Cagg[bin]
+
+    def aggregate_spm_t2(X, C, nn):
+        X, C, nn = prepare_binned_data(X, C, nn)
+        NS = X.shape[0]  # Number of slices.
+        Xagg = np.vstack([
+            (X * nn)[: NS / 2].sum(axis=(0, 1)) / nn[: NS / 2].sum(axis=(0, 1)),
+            (X * nn)[NS / 2 :].sum(axis=(0, 1)) / nn[NS / 2 :].sum(axis=(0, 1))])
+        Cagg = np.vstack([
+            (C * nn)[: NS / 2].sum(axis=(0, 1)) / nn[: NS / 2].sum(axis=(0, 1)),
+            (C * nn)[NS / 2 :].sum(axis=(0, 1)) / nn[NS / 2 :].sum(axis=(0, 1))])
+        return Xagg[bin], Cagg[bin]
+
+    AGG = {
+        None: aggregate_1,
+        (1, 1, 1): aggregate_spm_1,
+        (1, 1, 2): aggregate_spm_t2,
+        (1, 3, 1): aggregate_spm_h3,
+    }
+    aggregate = AGG[spm]
+
     for sample in samples:
 
         fv, ii, cc, _ = load_sample_data(
-            dataset, sample, return_info=True, analytical_fim=analytical_fim)
+            dataset, sample, return_info=True, analytical_fim=analytical_fim,
+            encoding=encoding)
 
         if len(fv) == 0 or str(sample) in tr_video_names:
             continue
 
         nd = ii['nr_descs']
-        nd = nd[nd != 0][:, np.newaxis]
         ll = ii['label']
 
-        tr_video_data[jj] = (fv * nd).sum(axis=0) / nd.sum()
-        tr_video_counts[jj] = (cc * nd).sum(axis=0) / nd.sum()
+        fv_agg, cc_agg = aggregate(fv, cc, nd)
+
+        tr_video_data[jj] = fv_agg
+        tr_video_counts[jj] = cc_agg
+
         tr_video_labels.append(ll)
         tr_video_names.append(str(sample))
 
@@ -357,21 +411,41 @@ def load_video_data(
         if verbose:
             print '%5d %5d %s' % (jj, fv.shape[0], sample.movie)
 
+    tr_video_data[np.isnan(tr_video_data)] = 0
+    tr_video_counts[np.isnan(tr_video_counts)] = 0
+
     return tr_video_data[:jj], tr_video_counts[:jj], tr_video_labels[:jj]
 
 
 def load_sample_data(
     dataset, sample, analytical_fim=False, pi_derivatives=False,
-    sqrt_nr_descs=False, return_info=False):
+    sqrt_nr_descs=False, return_info=False, encoding='fv'):
+
+    ENC_PARAMS = {
+        'fv': {
+            'suffix_enc': '',
+            'get_dim': lambda gmm: gmm.k * (2 * gmm.d + 1),
+            'sstats_to_features': FVModel.sstats_to_features,
+            'sstats_to_normalized_features': FVModel.sstats_to_normalized_features,
+        },
+        'sfv': {
+            'suffix_enc': '_sfv',
+            'get_dim': lambda gmm: gmm.k * (2 * 3 + 1),
+            'sstats_to_features': SFVModel.spatial_sstats_to_spatial_features,
+        },
+    }
 
     if str(sample) in ('train', 'test'):
         stats_file = "%s.dat" % sample
         labels_file = "labels_%s.info" % sample
         info_file = "info_%s.info" % sample
     else:
-        stats_file = "stats.tmp/%s.dat" % sample
-        labels_file = "stats.tmp/%s.info" % sample
-        info_file = labels_file
+        stats_tmp = "stats.tmp%s%s/%s" % (
+            dataset.SUFFIX_STATS, ENC_PARAMS[encoding]['suffix_enc'], sample)
+
+        stats_file = "%s.dat" % stats_tmp
+        labels_file = "%s.info" % stats_tmp
+        info_file = "%s.info" % stats_tmp
 
     stats_path = os.path.join(dataset.SSTATS_DIR, stats_file)
     labels_path = os.path.join(dataset.SSTATS_DIR, labels_file)
@@ -381,16 +455,16 @@ def load_sample_data(
         gmm = yael.gmm_read(ff)
 
     K = gmm.k
-    D = gmm.k * (2 * gmm.d + 1)
+    D = ENC_PARAMS[encoding]['get_dim'](gmm)
 
     data = np.fromfile(stats_path, dtype=np.float32)
     data = data.reshape(-1, D)
     counts = data[:, : K]
 
     if analytical_fim:
-        data = FVModel.sstats_to_normalized_features(data, gmm)
+        data = ENC_PARAMS[encoding]['sstats_to_normalized_features'](data, gmm)
     else:
-        data = FVModel.sstats_to_features(data, gmm)
+        data = ENC_PARAMS[encoding]['sstats_to_features'](data, gmm)
 
     with open(labels_path, 'r') as ff:
         labels = cPickle.load(ff)
@@ -404,7 +478,10 @@ def load_sample_data(
     else:
         T = 1.
 
-    if pi_derivatives:
+    if pi_derivatives or encoding == 'sfv':
+        # For the spatial Fisher vector encoding I drop the `pi_derivatives`,
+        # so I need the full vector, no matter the value of the `pi_derivates`
+        # parameter.
         idxs = slice(D)
     else:
         idxs = slice(K, D)
