@@ -142,6 +142,22 @@ CFG = {
         },
         'metric': 'average_precision',
     },
+    'hmdb.delta_5':{
+        'dataset_name': 'hmdb',
+        'dataset_params': {
+            'ip_type': 'dense5.track15mbh',
+            'nr_clusters': 1000,
+            'suffix': '.per_slice.delta_5',
+            'tmp_suffix': '_spm131',
+        },
+        'samples_chunk': 100,
+        'eval_name': 'hmdb',
+        'spms': [(1, 1, 1), (1, 1, 2), (1, 3, 1)],
+        'encodings': ['fv', 'sfv'],
+        'eval_params': {
+        },
+        'metric': 'accuracy',
+    },
     'hmdb_split1':{
         'dataset_name': 'hmdb_split1',
         'dataset_params': {
