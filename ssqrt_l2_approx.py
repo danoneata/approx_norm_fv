@@ -2,6 +2,7 @@
 import argparse
 from collections import defaultdict
 import cPickle
+from itertools import izip
 from multiprocessing import Pool
 import numpy as np
 import pdb
@@ -206,37 +207,84 @@ def sum_and_scale_by_squared(data, coef, mask=None):
 @my_cacher('np')
 def load_corrected_norms(
     dataset, samples, nr_slices_to_aggregate, scalers, analytical_fim,
-    verbose=0, outfile=None):
+    outfile=None, spm=(1, -1, -1), encoding='fv', verbose=0):
 
     jj = 0
     N = len(samples)
     D, K = dataset.D, dataset.VOC_SIZE
+    VW_DIM = D if encoding == 'fv' else 3
+    FV_DIM = 2 * K * D if encoding == 'fv' else 2 * 3 * K
+    N_BINS = np.prod(spm)
 
-    visual_word_mask = build_visual_word_mask(D, K)
-    tr_l2_norms = np.zeros((N, K), dtype=np.float32)
+    visual_word_mask = build_visual_word_mask(VW_DIM, K)
+    tr_l2_norms = np.zeros((N, N_BINS * K), dtype=np.float32)
     names = []
+
+    def prepare_binned_data(X, nn):
+        nn = nn.T
+        X = X.reshape(nn.shape[0], nn.shape[1], FV_DIM)
+        return X, nn
+
+    def sum_h3(X, nn):
+        """Sums up the H3 pyramid."""
+        X = (X * nn).sum(axis=1) / nn.sum(axis=1)
+        nn = nn.sum(axis=1)
+        X[np.isnan(X)] = 0
+        return X, nn
+
+    def compute_l2_norm_(X, nn):
+        """Computes L2 norm per visual word and for each aggregated slice."""
+        slice_agg_mask = build_slice_agg_mask(X.shape[0], nr_slices_to_aggregate)
+        Xagg = sum_by(X * nn, mask=slice_agg_mask) / nn.sum()
+        Xagg[np.isnan(Xagg)] = 0
+        for scaler in scalers:
+            if scaler is None:
+                continue
+            Xagg = scaler.transform(Xagg)
+        return visual_word_l2_norm(Xagg, visual_word_mask)
+
+    def aggregate_1(X, nn):
+        nn = nn[nn != 0][:, np.newaxis]
+        return np.sum(compute_l2_norm_(X, nn), axis=0)
+
+    def aggregate_spm_1(X, nn):
+        X, nn = sum_h3(*prepare_binned_data(X, nn))
+        return np.sum(compute_l2_norm_(X, nn), axis=0)
+
+    def aggregate_spm_h3(X, nn):
+        X, nn = prepare_binned_data(X, nn)
+        return np.hstack([
+            np.sum(compute_l2_norm_(X[:, ii], nn[:, ii]), axis=0)
+            for ii in xrange(X.shape[1])])
+
+    def aggregate_spm_t2(X, nn):
+        X, nn = sum_h3(*prepare_binned_data(X, nn))
+        NS = X.shape[0]
+        return np.hstack([
+            np.sum(compute_l2_norm_(X[: NS / 2], nn[: NS / 2]), axis=0),
+            np.sum(compute_l2_norm_(X[NS / 2 :], nn[NS / 2 :]), axis=0)])
+
+    AGG = {
+        (1, -1, -1): aggregate_1, # FIXME Hack.
+        (1, 1, 1): aggregate_spm_1,
+        (1, 1, 2): aggregate_spm_t2,
+        (1, 3, 1): aggregate_spm_h3,
+    }
+    aggregate = AGG[spm]
 
     for sample in samples:
 
         fv, ii, cc, _ = load_sample_data(
-            dataset, sample, analytical_fim=analytical_fim,
+            dataset, sample, analytical_fim=analytical_fim, encoding=encoding,
             **LOAD_SAMPLE_DATA_PARAMS)
 
         if len(fv) == 0 or str(sample) in names:
             continue
 
         nd = ii['nr_descs']
-        nd = nd[nd != 0]
         ll = ii['label']
 
-        slice_agg_mask = build_slice_agg_mask(fv.shape[0], nr_slices_to_aggregate)
-        agg_fisher_vectors = sum_by(fv * nd[:, np.newaxis], mask=slice_agg_mask) / nd.sum()
-        for scaler in scalers:
-            if scaler is None:
-                continue
-            agg_fisher_vectors = scaler.transform(agg_fisher_vectors)
-        tr_l2_norms[jj] = np.sum(
-            visual_word_l2_norm(agg_fisher_vectors, visual_word_mask), axis=0)
+        tr_l2_norms[jj] = aggregate(fv, nd)
         names.append(str(sample))
 
         jj += 1
@@ -415,7 +463,7 @@ def load_normalized_tr_data(
             # Prepare the L2 norms using the possibly modified `tr_slice_data`.
             scalers = kwargs.get('scalers')
             norm_filename = tr_outfile + ".norm_slices%d_scaler%s" % (
-                nr_slices_to_aggregate, np.any(scalers))
+                nr_slices_to_aggregate, any(scalers))
             tr_video_l2_norms = load_corrected_norms(
                 dataset, samples, nr_slices_to_aggregate,
                 analytical_fim=analytical_fim, scalers=scalers,
