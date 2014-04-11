@@ -26,14 +26,12 @@ from ssqrt_l2_approx import load_corrected_norms
 
 
 PI_DERIVATIVES = False 
-ANALYTICAL_FIM = False
 SQRT_NR_DESCS = False
 
 # Caching path.
 OUTFILE = os.path.join(
     CACHE_PATH, "%s_%s_afim_%s_pi_%s_sqrt_nr_descs_%s_enc%s_spm%s.dat" % (
-        "%s", "%s", ANALYTICAL_FIM, PI_DERIVATIVES, SQRT_NR_DESCS,
-        "%s", "%s"))
+        "%s", "%s", "%s", PI_DERIVATIVES, SQRT_NR_DESCS, "%s", "%s"))
 
 def compute_kernels(loader, scaler_1, square_root, scaler_2, compute_l2_norm):
 
@@ -106,8 +104,8 @@ def load_kernels_l2_norm_enc(counter, loader, normalizations, spms, encodings):
 
 
 def load_kernels_all(
-    src_cfg, e_std_1, sqrt, e_std_2, l2_norm, nr_slices_to_aggregate=None,
-    verbose=0):
+    src_cfg, e_std_1, sqrt, e_std_2, l2_norm, afim,
+    nr_slices_to_aggregate=None, verbose=0):
 
     dataset = Dataset(
         CFG[src_cfg]['dataset_name'],
@@ -244,6 +242,10 @@ def main():
     parser.add_argument(
         '-n', '--nr_slices_to_aggregate', type=int, default=1,
         help="aggregates consecutive FVs.")
+    parser.add_argument(
+        '--afim', default=False, action='store_true',
+        help=("uses FVs that are standardized with the analytical Fisher "
+              "information matrix."))
     parser.add_argument(
         '-v', '--verbose', action='count', help="verbosity level.")
 
