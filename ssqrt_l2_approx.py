@@ -496,7 +496,7 @@ def predict_main(
     eval.fit(tr_kernel, tr_video_labels)
     clfs = [
         compute_weights(eval.get_classifier(cls), tr_video_data, tr_std=None)
-        for ii in xrange(eval.nr_classes)]
+        for cls in xrange(eval.nr_classes)]
 
     if verbose:
         print "Loading test data."
