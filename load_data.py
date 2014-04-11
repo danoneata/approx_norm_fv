@@ -329,7 +329,7 @@ def my_cacher(*args):
 @my_cacher('np', 'np', 'cp')
 def load_video_data(
     dataset, samples, verbose=0, outfile=None, analytical_fim=True,
-    pi_derivatives=False, sqrt_nr_descs=False, spm=None, encoding='fv'):
+    pi_derivatives=False, sqrt_nr_descs=False, spm=(1, -1, -1), encoding='fv'):
 
     jj = 0
     N = len(samples)
@@ -379,7 +379,6 @@ def load_video_data(
         return Xagg.flatten(), Cagg.flatten()
 
     AGG = {
-        None: aggregate_1,
         (1, -1, -1): aggregate_1, # FIXME Hack.
         (1, 1, 1): aggregate_spm_1,
         (1, 1, 2): aggregate_spm_t2,
