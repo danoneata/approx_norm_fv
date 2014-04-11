@@ -123,6 +123,10 @@ def load_kernels_all(
         def transform(self, X):
             return X
 
+    def get_slice(bin, spm, D):
+        N_bins = np.prod(spm)
+        return slice(D / N_bins * bin, D / N_bins * (bin + 1))
+
     def loader(split, spm=None, encoding=None, bin=None):
         """Loads sufficient statistics."""
 
@@ -130,24 +134,20 @@ def load_kernels_all(
         N = len(set(map(str, samples)))
 
         outfile = OUTFILE % (
-            src_cfg, split,
+            src_cfg, split, afim,
             '_' + encoding,
             ''.join(map(str, spm)))
 
         data, counts, labels = load_video_data(
-            dataset, samples, outfile=outfile, analytical_fim=ANALYTICAL_FIM,
+            dataset, samples, outfile=outfile, analytical_fim=afim,
             pi_derivatives=PI_DERIVATIVES, sqrt_nr_descs=SQRT_NR_DESCS,
             encoding=encoding, spm=spm, verbose=verbose)
-        N_bins = np.prod(spm)
 
         _, D_data = data.shape
         _, D_counts = counts.shape
 
-        def get_slice(D):
-            return slice(D / N_bins * bin, D / N_bins * (bin + 1))
-
-        I_data = get_slice(D_data)
-        I_counts = get_slice(D_counts)
+        I_data = get_slice(bin, spm, D_data)
+        I_counts = get_slice(bin, spm, D_counts)
 
         return data[:, I_data], counts[:, I_counts], labels
 
@@ -163,20 +163,23 @@ def load_kernels_all(
 
         # Prepare cached filename.
         outfile = OUTFILE % (
-            src_cfg, split,
+            src_cfg, split, afim,
             '_' + encoding,
             ''.join(map(str, spm)))
         suffix = "norm_slices_%d_scalers_%s_%s" % (
             nr_slices_to_aggregate, e_std_1, e_std_2)
-        norm_filename = '.'.join((outfile % "train", suffix))
+        norm_filename = outfile + '.' + suffix
 
         samples, _ = dataset.get_data(split)
-        tr_video_l2_norms = load_corrected_norms(
+        video_l2_norms = load_corrected_norms(
             dataset, samples, nr_slices_to_aggregate,
-            analytical_fim=ANALYTICAL_FIM, scalers=scalers,
+            analytical_fim=afim, scalers=scalers, spm=spm, encoding=encoding,
             verbose=verbose, outfile=norm_filename)[0]
 
-        return compute_approx_l2_normalization_(data, tr_video_l2_norms, counts)
+        pdb.set_trace()
+
+        I = get_slice(bin, spm, video_l2_norms.shape[1])
+        return compute_approx_l2_normalization_(video_l2_norms[:, I], counts)
 
     SQUARE_ROOT_TABLE = {
         'exact': lambda data, **kwargs: power_normalize(data, 0.5),
