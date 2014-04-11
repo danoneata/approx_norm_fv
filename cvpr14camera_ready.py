@@ -97,6 +97,9 @@ def load_kernels_l2_norm_enc(counter, loader, normalizations, spms, encodings):
             tr_kernel_enc /= np.sqrt(tr_Z[:, np.newaxis] * tr_Z[np.newaxis])
             te_kernel_enc /= np.sqrt(te_Z[:, np.newaxis] * tr_Z[np.newaxis])
 
+            tr_kernel_enc[np.isinf(tr_kernel_enc)] = 0
+            te_kernel_enc[np.isinf(te_kernel_enc)] = 0
+
             tr_kernel += tr_kernel_enc
             te_kernel += te_kernel_enc
 
