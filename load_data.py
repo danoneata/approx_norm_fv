@@ -42,7 +42,6 @@ hmdb_stab_dict = {
         'metric': 'accuracy',
     } for ii in xrange(1, 4)}
 
-
 hmdb_all_descs_dict = {
     'hmdb_split%d.delta_5.all_descs' % ii :{
         'dataset_name': 'hmdb_split%d' % ii,
@@ -58,6 +57,25 @@ hmdb_all_descs_dict = {
         },
         'metric': 'accuracy',
     } for ii in xrange(1, 4)}
+
+hmdb_delta_5 = {
+    'hmdb_split%d.delta_5' % ii :{
+        'dataset_name': 'hmdb',
+        'dataset_params': {
+            'ip_type': 'dense5.track15mbh',
+            'nr_clusters': 1000,
+            'suffix': '.per_slice.delta_5',
+            'tmp_suffix': '_spm131',
+        },
+        'samples_chunk': 100,
+        'eval_name': 'hmdb',
+        'spms': [(1, 1, 1), (1, 1, 2), (1, 3, 1)],
+        'encodings': ['fv', 'sfv'],
+        'eval_params': {
+        },
+        'metric': 'accuracy',
+    } for ii in xrange(1, 4)}
+
 
 
 cache_dir = os.path.expanduser('~/scratch2/tmp')
@@ -146,22 +164,6 @@ CFG = {
         'eval_params': {
         },
         'metric': 'average_precision',
-    },
-    'hmdb.delta_5':{
-        'dataset_name': 'hmdb',
-        'dataset_params': {
-            'ip_type': 'dense5.track15mbh',
-            'nr_clusters': 1000,
-            'suffix': '.per_slice.delta_5',
-            'tmp_suffix': '_spm131',
-        },
-        'samples_chunk': 100,
-        'eval_name': 'hmdb',
-        'spms': [(1, 1, 1), (1, 1, 2), (1, 3, 1)],
-        'encodings': ['fv', 'sfv'],
-        'eval_params': {
-        },
-        'metric': 'accuracy',
     },
     'hmdb_split1':{
         'dataset_name': 'hmdb_split1',
@@ -275,6 +277,7 @@ CFG = {
 
 CFG.update(hmdb_stab_dict)
 CFG.update(hmdb_all_descs_dict)
+CFG.update(hmdb_delta_5)
 
 
 def my_cacher(*args):
