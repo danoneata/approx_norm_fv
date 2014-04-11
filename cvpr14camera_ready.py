@@ -5,7 +5,7 @@ import ipdb as pdb
 import numpy as np
 import os
 
-from sklearn.preprocessing import Scaler
+from sklearn.preprocessing import StandardScaler
 
 from dataset import Dataset
 
@@ -191,7 +191,7 @@ def load_kernels_all(
     }
 
     def get_scaler(bool):
-        return Scaler() if bool else DummyScaler()
+        return StandardScaler(with_mean=False) if bool else DummyScaler()
 
     normalizations = {
         'scaler_1'        : get_scaler(e_std_1),
