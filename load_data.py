@@ -259,6 +259,32 @@ CFG = {
         'metric': 'average_precision',
         'chunk_size': 30,
     },
+    'duch09.no_stab':{
+        'dataset_name': 'duch09',
+        'dataset_params': {
+            'ip_type': 'dense5.track15mbh',
+            'nr_clusters': 128,
+            'suffix': '.delta_5.no_stab',
+        },
+        'eval_name': 'cc',
+        'eval_params': {
+        },
+        'metric': 'average_precision',
+        'chunk_size': 5,
+    },
+    'duch09.old_dict':{
+        'dataset_name': 'duch09',
+        'dataset_params': {
+            'ip_type': 'dense5.track15mbh',
+            'nr_clusters': 128,
+            'suffix': '.delta_5.no_stab.old_dictionary',
+        },
+        'eval_name': 'cc',
+        'eval_params': {
+        },
+        'metric': 'average_precision',
+        'chunk_size': 5,
+    },
     'duch09.delta_5.all_descs':{
         'dataset_name': 'duch09',
         'dataset_params': {
