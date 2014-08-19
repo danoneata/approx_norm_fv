@@ -10,7 +10,8 @@ import tempfile
 
 import matplotlib.pyplot as plt
 import numpy as np
-from ipdb import set_trace
+from pdb import set_trace
+# from ipdb import set_trace
 
 from sklearn.preprocessing import Scaler
 from yael import yael
@@ -60,7 +61,7 @@ hmdb_all_descs_dict = {
 
 hmdb_delta_5 = {
     'hmdb_split%d.delta_5' % ii :{
-        'dataset_name': 'hmdb',
+        'dataset_name': 'hmdb_split%d' % ii,
         'dataset_params': {
             'ip_type': 'dense5.track15mbh',
             'nr_clusters': 1000,
@@ -75,7 +76,6 @@ hmdb_delta_5 = {
         },
         'metric': 'accuracy',
     } for ii in xrange(1, 4)}
-
 
 
 cache_dir = os.path.expanduser('~/scratch2/tmp')
@@ -367,6 +367,9 @@ def load_video_data(
     FV_DIM = 2 * K * D if encoding == 'fv' else 2 * 3 * K
     N_BINS = np.prod(spm)
 
+    if pi_derivatives and encoding == 'fv':
+        FV_DIM += K
+
     tr_video_data = np.zeros((N, N_BINS * FV_DIM), dtype=np.float32)
     tr_video_counts = np.zeros((N, N_BINS * K), dtype=np.float32)
     tr_video_labels = []
@@ -420,7 +423,8 @@ def load_video_data(
 
         fv, ii, cc, _ = load_sample_data(
             dataset, sample, return_info=True, analytical_fim=analytical_fim,
-            encoding=encoding)
+            encoding=encoding, pi_derivatives=pi_derivatives,
+            sqrt_nr_descs=sqrt_nr_descs)
 
         if len(fv) == 0 or str(sample) in tr_video_names:
             continue

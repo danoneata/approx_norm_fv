@@ -5,7 +5,13 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 import numpy as np
 import random
+import socket
 import sys
+
+if socket.gethostname().startswith('node'):
+    import pdb
+else:
+    import ipdb as pdb
 
 from sklearn.preprocessing import Scaler
 

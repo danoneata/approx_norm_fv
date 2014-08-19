@@ -4,11 +4,16 @@ import cPickle
 from fractions import gcd
 from itertools import groupby
 import numpy as np
-import pdb
 import os
+import socket
 from scipy import sparse
 import sys
 import time
+
+if socket.gethostname().startswith('node'):
+    import pdb
+else:
+    import ipdb as pdb
 
 from sklearn.preprocessing import Scaler
 
@@ -43,7 +48,10 @@ from ssqrt_l2_approx import sum_by
 from ssqrt_l2_approx import visual_word_l2_norm
 from ssqrt_l2_approx import visual_word_scores
 
-from test_approx_ess import non_maxima_supression
+#from test_approx_ess import non_maxima_supression
+#from nms.nms import non_maxima_supression
+#from nms.nms_kdtree import non_maxima_supression
+from nms.nms_2 import non_maxima_supression_0
 
 
 # TODO Things to improve
@@ -853,12 +861,15 @@ def main():
         '--save_results', action='store_true', default=False,
         help="dumps results to disk in seperate files for each delta.")
     parser.add_argument(
+        '-w', '--overwrite', default=False, action='store_true',
+        help=("overwrites the result file."))
+    parser.add_argument(
         '-v', '--verbose', action='count', help="verbosity level.")
 
     args = parser.parse_args()
     deltas = range(args.begin, args.end + args.delta, args.delta)
 
-    if args.timings_file is None and args.algorithm == 'cy_approx_ess':
+    if args.timings_file is None and args.algorithm.startswith('cy_approx_ess'):
          args.timings_file = (
              '/home/lear/oneata/data/cc/results/cy_approx_ess_class_%d_timings.txt'
              % args.class_idx)
@@ -871,6 +882,9 @@ def main():
             args.stride,
             '_'.join(map(str, deltas)))
 
+    if args.overwrite and os.path.exists(args.results_file):
+        os.remove(args.results_file)
+
     results = evaluation(
         args.algorithm, args.dataset, args.class_idx, args.stride, deltas,
         rescore=args.rescore, no_integral=args.no_integral,
@@ -880,15 +894,22 @@ def main():
     if args.rescore and 'ess' not in args.algorithm:
         results = {
             movie: [
-                (bf, ef, score * (ef - bf))
+                (bf, ef, score * (ef - bf) / 30)
                 for bf, ef, score in movie_results]
             for movie, movie_results in results.iteritems()}
 
     # I do the NMS myself and skip it in Adrien's code.
     if 'ess' not in args.algorithm:  # ESS does 0-NMS automatically.
+        start = time.time()
+        # TODO Parallelize across movies.
         results = {
-            movie: non_maxima_supression(movie_results, nms_overlap=0)
+            movie: non_maxima_supression_0(
+                movie_results, args.delta, args.begin, args.end)
             for movie, movie_results in results.iteritems()}
+
+        if args.verbose > 2:
+            print "NMS time: %.2f s" % (time.time() - start)
+            print "Results file:", args.results_file
 
     adrien_results = [
         (SampID(SAMPID % (movie, bf, ef)), score)

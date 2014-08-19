@@ -705,6 +705,9 @@ def main():
         '--part', type=int,
         help=("part of the test data; the batches are of 100 samples."))
     parser.add_argument(
+        '-w', '--overwrite', default=False, action='store_true',
+        help=("overwrites the result file."))
+    parser.add_argument(
         '-v', '--verbose', action='count', help="verbosity level.")
     args = parser.parse_args()
 

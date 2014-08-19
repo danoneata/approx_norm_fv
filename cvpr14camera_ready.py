@@ -1,9 +1,10 @@
 
 import argparse
 import functools
-import ipdb as pdb
 import numpy as np
 import os
+import pdb
+import socket
 
 from sklearn.preprocessing import StandardScaler
 
@@ -100,6 +101,9 @@ def load_kernels_l2_norm_enc(counter, loader, normalizations, spms, encodings):
             tr_kernel_enc[np.isinf(tr_kernel_enc)] = 0
             te_kernel_enc[np.isinf(te_kernel_enc)] = 0
 
+            tr_kernel_enc[np.isnan(tr_kernel_enc)] = 0
+            te_kernel_enc[np.isnan(te_kernel_enc)] = 0
+
             tr_kernel += tr_kernel_enc
             te_kernel += te_kernel_enc
 
@@ -175,8 +179,6 @@ def load_kernels_all(
             dataset, samples, nr_slices_to_aggregate,
             analytical_fim=afim, scalers=scalers, spm=spm, encoding=encoding,
             verbose=verbose, outfile=norm_filename)[0]
-
-        pdb.set_trace()
 
         I = get_slice(bin, spm, video_l2_norms.shape[1])
         return compute_approx_l2_normalization_(video_l2_norms[:, I], counts)
@@ -261,6 +263,14 @@ def main():
         parser.error(
             "Approximate L2 normalization `--l2_norm approx` requires "
             "`--nr_slices_to_aggregate` argument.")
+
+    if args.l2_norm == 'approx' and args.sqrt != 'approx':
+        parser.error(
+            "Approximate L2 normalization `--l2_norm approx` requires "
+            "`--sqrt approx`.")
+
+    if args.verbose > 1:
+        print args
 
     evaluate(args.src_cfg, *load_kernels_all(**vars(args)))
 
