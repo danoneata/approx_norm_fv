@@ -304,7 +304,8 @@ def my_cacher(*args):
     def decorator(func):
         @functools.wraps(func)
         def wrapped(*args, **kwargs):
-            outfile = kwargs.get('outfile', tempfile.mkstemp()[1])
+            outfile = kwargs.get('outfile', None)
+            outfile = outfile or tempfile.mkstemp()[1]
             if os.path.exists(outfile):
                 with open(outfile, 'r') as ff:
                     return [loader(ff, sf) for sf in store_format]
