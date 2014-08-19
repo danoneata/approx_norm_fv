@@ -92,7 +92,8 @@ def mgcd(*args):
 
 @my_cacher('np', 'np', 'np', 'np', 'np')
 def load_data_delta_0(
-    dataset, movie, part, class_idx, outfile=None, delta_0=30, verbose=0):
+    dataset, movie, part, class_idx, analytical_fim, outfile=None, delta_0=30,
+    verbose=0):
     """ Loads Fisher vectors for the test data for detection datasets. """
 
     D, K = dataset.D, dataset.VOC_SIZE
@@ -124,7 +125,8 @@ def load_data_delta_0(
 
         # Read sufficient statistics and associated information.
         sample_fisher_vectors, _, sample_counts, sample_info = load_sample_data(
-            dataset, sample, analytical_fim=True, **LOAD_SAMPLE_DATA_PARAMS)
+            dataset, sample, analytical_fim=analytical_fim,
+            **LOAD_SAMPLE_DATA_PARAMS)
 
         sample_nr_descs = sample_info['nr_descs']
 
@@ -273,6 +275,54 @@ def only_positive(X):
 
 def only_negative(X):
     return np.ma.masked_greater(X, 0).filled(0)
+
+
+@timer
+def exact_sliding_window_no_sqrt_no_l2(
+    slice_data, clf, deltas, selector, scalers, visual_word_mask):
+
+    results = []
+    weights, bias = clf
+
+    # Prepare sliced data.
+    fisher_vectors = slice_data.fisher_vectors
+    for scaler in scalers:
+        if scaler is None:
+            continue
+        fisher_vectors = scaler.transform(fisher_vectors)
+    nr_descriptors_T = slice_data.nr_descriptors[:, np.newaxis]
+
+    # Multiply by the number of descriptors.
+    fisher_vectors = fisher_vectors * nr_descriptors_T
+    slice_scores = np.sum(- fisher_vectors * weights, axis=1)[:, np.newaxis]
+
+    if selector.integral:
+        slice_scores = integral(slice_scores)
+        nr_descriptors_T = integral(nr_descriptors_T)
+
+    N = fisher_vectors.shape[0]
+
+    for delta in deltas:
+
+        # Build mask.
+        mask = selector.get_mask(N, delta)
+        begin_frame_idxs, end_frame_idxs = selector.get_frame_idxs(N, delta)
+
+        # Approximated predictions.
+        scores = np.squeeze(
+            sum_by(slice_scores, mask) / sum_by(nr_descriptors_T, mask) + bias)
+        agg_begin_frames = slice_data.begin_frames[begin_frame_idxs]
+        agg_end_frames = slice_data.end_frames[end_frame_idxs]
+
+        assert len(scores) == len(agg_begin_frames) == len(agg_end_frames)
+
+        nan_idxs = np.isnan(scores)
+        results += zip(
+            agg_begin_frames[~nan_idxs],
+            agg_end_frames[~nan_idxs],
+            scores[~nan_idxs])
+
+    return results
 
 
 @timer
@@ -669,10 +719,48 @@ def evaluation(
                 'sqrt_type': 'none'
             },
         },
+        'e_std_1': {
+            'train_params': {
+                'analytical_fim': False,
+                'l2_norm_type': 'none',
+                'empirical_standardizations': [True, False],
+                'sqrt_type': 'none'
+            },
+            'sliding_window': exact_sliding_window,
+            'sliding_window_params': {
+                'l2_norm_type': 'none',
+                'sqrt_type': 'none'
+            },
+        },
+        'e_std_1.fast': {
+            'train_params': {
+                'analytical_fim': False,
+                'l2_norm_type': 'none',
+                'empirical_standardizations': [True, False],
+                'sqrt_type': 'none'
+            },
+            'sliding_window': exact_sliding_window_no_sqrt_no_l2,
+            'sliding_window_params': {
+                'visual_word_mask': visual_word_mask,
+            },
+        },
         'exact_L2': {
             'train_params': {
                 'l2_norm_type': 'exact',
                 'empirical_standardizations': [False, False],
+                'sqrt_type': 'none'
+            },
+            'sliding_window': exact_sliding_window,
+            'sliding_window_params': {
+                'l2_norm_type': 'exact',
+                'sqrt_type': 'none'
+            },
+        },
+        'exact_L2+e_std_1': {
+            'train_params': {
+                'analytical_fim': False,
+                'l2_norm_type': 'exact',
+                'empirical_standardizations': [True, False],
                 'sqrt_type': 'none'
             },
             'sliding_window': exact_sliding_window,
@@ -693,10 +781,36 @@ def evaluation(
                 'sqrt_type': 'exact'
             },
         },
+        'exact_sqrt+e_std_1': {
+            'train_params': {
+                'analytical_fim': False,
+                'l2_norm_type': 'none',
+                'empirical_standardizations': [True, False],
+                'sqrt_type': 'exact'
+            },
+            'sliding_window': exact_sliding_window,
+            'sliding_window_params': {
+                'l2_norm_type': 'none',
+                'sqrt_type': 'exact'
+            },
+        },
         'exact': {
             'train_params': {
                 'l2_norm_type': 'exact',
                 'empirical_standardizations': [False, False],
+                'sqrt_type': 'exact'
+            },
+            'sliding_window': exact_sliding_window,
+            'sliding_window_params': {
+                'l2_norm_type': 'exact',
+                'sqrt_type': 'exact'
+            },
+        },
+        'exact+e_std_1': {
+            'train_params': {
+                'analytical_fim': False,
+                'l2_norm_type': 'exact',
+                'empirical_standardizations': [True, False],
                 'sqrt_type': 'exact'
             },
             'sliding_window': exact_sliding_window,
@@ -721,6 +835,18 @@ def evaluation(
             'train_params': {
                 'l2_norm_type': 'approx',
                 'empirical_standardizations': [False, True],
+                'sqrt_type': 'approx'
+            },
+            'sliding_window': approx_sliding_window,
+            'sliding_window_params': {
+                'visual_word_mask': visual_word_mask
+            },
+        },
+        'approx+e_std_1': {
+            'train_params': {
+                'analytical_fim': False,
+                'l2_norm_type': 'approx',
+                'empirical_standardizations': [True, True],
                 'sqrt_type': 'approx'
             },
             'sliding_window': approx_sliding_window,
@@ -753,6 +879,21 @@ def evaluation(
                 'timings_file': timings_file,
             },
         },
+        'cy_approx_ess+e_std_1': {
+            'train_params': {
+                'analytical_fim': False,
+                'l2_norm_type': 'approx',
+                'empirical_standardizations': [True, True],
+                'sqrt_type': 'approx'
+            },
+            'sliding_window': cy_approx_sliding_window_ess,
+            'sliding_window_params': {
+                'visual_word_mask': visual_word_mask,
+                'rescore': rescore,
+                'timings_file': timings_file,
+            },
+        },
+
     }
 
     chunk_size = CFG[src_cfg]['chunk_size']
@@ -764,10 +905,14 @@ def evaluation(
     if src_cfg == 'cc':
         tr_nr_agg = 1
 
-    tr_outfile = '/scratch2/clear/oneata/tmp/joblib/%s_cls%d_train.dat' % (src_cfg, class_idx)
+    analytical_fim = ALGO_PARAMS[algo_type]['train_params'].pop('analytical_fim', True)
+    afim_suffix = '_no_afim' if not analytical_fim else ''
+    tr_outfile = '/scratch2/clear/oneata/tmp/joblib/%s_cls%d_train%s.dat' % (
+        src_cfg, class_idx, afim_suffix)
     tr_video_data, tr_video_labels, tr_stds = load_normalized_tr_data(
         dataset, tr_nr_agg, tr_outfile=tr_outfile, verbose=verbose,
-        analytical_fim=True, **ALGO_PARAMS[algo_type]['train_params'])
+        analytical_fim=analytical_fim,
+        **ALGO_PARAMS[algo_type]['train_params'])
 
     # Sub-sample data.
     no_tuple_labels = np.array([ll[0] for ll in tr_video_labels])
@@ -791,11 +936,12 @@ def evaluation(
         results[movie] = []
         for part in xrange(len(dataset.CLASS_LIMITS[movie][class_name])):
             te_outfile = (
-                '/scratch2/clear/oneata/tmp/joblib/%s_cls%d_movie%s_part%d_test.dat' %
-                (src_cfg, class_idx, movie, part))
+                '/scratch2/clear/oneata/tmp/joblib/%s_cls%d_movie%s_part%d%s_test.dat' %
+                (src_cfg, class_idx, movie, part, afim_suffix))
             te_slice_data = SliceData(*load_data_delta_0(
                 dataset, movie, part, class_idx, delta_0=chunk_size,
-                outfile=te_outfile))
+                analytical_fim=analytical_fim, outfile=te_outfile))
+            pdb.set_trace()
 
             if verbose > 1:
                 print "Aggregating data."
@@ -829,8 +975,6 @@ def main():
         help="which dataset.")
     parser.add_argument(
         '-a', '--algorithm', required=True,
-        choices=('none', 'approx', 'approx_ess', 'cy_approx_ess', 'exact',
-                 'exact_sqrt', 'exact_L2', 'approx_sqrt_exact_L2'),
         help="specifies the type of normalizations.")
     parser.add_argument(
         '--rescore', action='store_true', default=False,
